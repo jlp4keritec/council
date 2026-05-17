@@ -1,0 +1,21 @@
+{
+  "name": "llm-council",
+  "version": "2.6.0",
+  "description": "LLM Council Node.js — orchestration multi-modèles via OpenRouter",
+  "type": "module",
+  "main": "backend/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node --watch backend/server.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "docx": "^9.6.1",
+    "dotenv": "^16.4.5",
+    "fastify": "^5.1.0",
+    "pptxgenjs": "^4.0.1"
+  }
+}

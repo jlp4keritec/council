@@ -1,0 +1,33 @@
+# Node
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Secrets & data
+.env
+.env.*
+!.env.example
+!.env.example.free
+data/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Deploy artifacts
+deploy.zip
+deploy-config.json
+*.bak
+*.tmp
