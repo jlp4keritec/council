@@ -1,5 +1,11 @@
 // Fastify backend pour le LLM Council.
 //
+// V2.7 :
+// - Quota dynamique : /api/usage detecte automatiquement le mode actif
+//   (free sans credit / free avec 10$ / payant ou mixte) selon le council
+//   actif et le statut OpenRouter /auth/key
+// - Nouveau POST /api/usage/refresh pour invalider le cache OpenRouter
+//
 // V2 :
 // - GET /api/models?search=...&pricing=free|paid|all  proxy OpenRouter (cache 1h)
 // - POST .../message[/stream] accepte un champ `override` pour customiser
@@ -36,6 +42,7 @@ import {
 import { aggregateUsage } from './pricing.js';
 import { pingModelsParallel, getRecentModelErrors } from './openrouter.js';
 import { exportToMarkdown, exportToJson, exportToDocx, exportToPptx } from './exporters.js';
+import { computeEffectiveQuota, invalidateKeyInfoCache } from './quota.js';
 
 const fastify = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info' },
@@ -102,7 +109,7 @@ async function fetchOpenRouterModels() {
 fastify.get('/', async () => ({
   status: 'ok',
   service: 'LLM Council API',
-  version: '2.1.0',
+  version: '2.7.0',
 }));
 
 fastify.get('/health', async () => ({ status: 'ok' }));
@@ -211,15 +218,31 @@ fastify.get('/api/models', async (request) => {
 });
 
 // ---------------------------------------------------------------------------
-// Usage / Quota — compte les questions posees aujourd'hui
+// Usage / Quota — quota dynamique selon council actif + statut OpenRouter
 // ---------------------------------------------------------------------------
+// Query params optionnels (envoyes par la sidebar pour respecter l'override
+// localStorage de l'utilisateur) :
+//   ?council_models=a,b,c&chairman_model=x&title_model=y
+// Si absent, on tombe sur les defaults .env.
+//
+// Reponse : champs retro-compatibles `questions_today`, `quota_daily`,
+// `remaining`, `percent_used` toujours presents pour ne pas casser la sidebar
+// + nouvelle struct `quota` avec mode/raison/credit balance.
 
-fastify.get('/api/usage', async () => {
+fastify.get('/api/usage', async (request) => {
+  const q = request.query || {};
+  const activeConfig = {
+    council_models: q.council_models
+      ? q.council_models.split(',').map((m) => m.trim()).filter(Boolean)
+      : COUNCIL_MODELS,
+    chairman_model: q.chairman_model || CHAIRMAN_MODEL,
+    title_model: q.title_model || TITLE_MODEL,
+  };
+
+  // Compter les questions du jour (= messages assistant crees aujourd'hui)
   const conversations = await storage.listConversations();
-  const today = new Date().toISOString().slice(0, 10);   // YYYY-MM-DD
-
+  const today = new Date().toISOString().slice(0, 10);
   let questionsToday = 0;
-  // On compte les messages assistant (= 1 question complete = 1 message) creees aujourd'hui
   for (const conv of conversations) {
     const full = await storage.getConversation(conv.id);
     if (!full) continue;
@@ -231,18 +254,44 @@ fastify.get('/api/usage', async () => {
     }
   }
 
-  const remaining = Math.max(0, DAILY_QUOTA_QUESTIONS - questionsToday);
-  const percent_used = DAILY_QUOTA_QUESTIONS > 0
-    ? Math.min(100, Math.round((questionsToday / DAILY_QUOTA_QUESTIONS) * 100))
+  // Detection dynamique du quota effectif
+  const quota = await computeEffectiveQuota(activeConfig);
+
+  // Calculs derives (peut etre null si mode 'paid_or_mixed' sans barre)
+  const limit = quota.questions_per_day;
+  const remaining = limit != null ? Math.max(0, limit - questionsToday) : null;
+  const percent_used = limit != null && limit > 0
+    ? Math.min(100, Math.round((questionsToday / limit) * 100))
     : 0;
 
   return {
+    // Champs retro-compatibles (la sidebar v2.6 les utilise)
     questions_today: questionsToday,
-    quota_daily: DAILY_QUOTA_QUESTIONS,
-    remaining,
+    quota_daily: limit != null ? limit : DAILY_QUOTA_QUESTIONS,
+    remaining: remaining != null ? remaining : 9999,
     percent_used,
-    estimated_requests: questionsToday * 10,   // ~10 appels OpenRouter par question
+    estimated_requests: questionsToday * 10,
+
+    // Nouvelle struct quota dynamique (sidebar v2.7 l'utilise)
+    quota: {
+      mode: quota.mode,                              // free_no_credit | free_with_credit | paid_or_mixed | unknown
+      limit,                                          // null = pas de barre (mode payant)
+      raw_requests_per_day: quota.raw_requests_per_day,
+      show_progress_bar: quota.show_progress_bar,
+      reason: quota.reason,
+      openrouter_tier: quota.openrouter_tier,
+      credit_balance_usd: quota.credit_balance_usd,
+      manual_override: quota.manual_override,
+    },
   };
+});
+
+// Permet a l'UI de forcer un refresh apres avoir depose un credit sur OpenRouter
+// (sinon cache de 1h cote backend).
+fastify.post('/api/usage/refresh', async () => {
+  invalidateKeyInfoCache();
+  fastify.log.info('Cache OpenRouter /auth/key invalide manuellement');
+  return { ok: true, message: 'Cache invalide, prochain GET /api/usage rafraichira' };
 });
 
 // ---------------------------------------------------------------------------

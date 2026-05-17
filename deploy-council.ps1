@@ -91,7 +91,7 @@ function Get-SshArgs {
 function Invoke-SshCommand {
     param($cfg, $cmd)
     $sshArgs = Get-SshArgs $cfg
-    & ssh @sshArgs "$($cfg.user)@$($cfg.host)" $cmd
+    & ssh @sshArgs "$($cfg.user)@$($cfg.host)" $cmd | Out-Host
     return $LASTEXITCODE
 }
 
@@ -100,7 +100,7 @@ function Invoke-SshBashScript {
     param($cfg, $script)
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script))
     $sshArgs = Get-SshArgs $cfg
-    & ssh @sshArgs "$($cfg.user)@$($cfg.host)" "echo $b64 | base64 -d | bash -s"
+    & ssh @sshArgs "$($cfg.user)@$($cfg.host)" "echo $b64 | base64 -d | bash -s" | Out-Host
     return $LASTEXITCODE
 }
 
@@ -109,7 +109,7 @@ function Invoke-Scp {
     $scpArgs = @("-o","StrictHostKeyChecking=no","-P",$cfg.port)
     if ($cfg.authMethod -eq "key" -and $cfg.sshKeyPath) { $scpArgs += "-i", $cfg.sshKeyPath }
     $scpArgs += $local, "$($cfg.user)@$($cfg.host):$remote"
-    & scp @scpArgs
+    & scp @scpArgs | Out-Host
     return $LASTEXITCODE
 }
 
@@ -163,32 +163,49 @@ function New-DeployPackage {
     $zipPath = Join-Path $ProjectPath "deploy.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
-    $excludeDirs = @(
+    # Exclusion par SEGMENT (matche partout dans le chemin, pas seulement a la racine)
+    # ex: frontend/node_modules/foo sera bien exclu grace au segment "node_modules"
+    $excludeSegments = @(
         "node_modules", ".git", ".vscode", ".idea", "logs",
         "data", ".vite"
     )
+    # On garde 'dist' explicitement pour que frontend/dist (build Vite) parte sur le VPS
+
     $excludePatterns = @(
         "*.log", "*.zip", "*.bak", "*.tmp",
-        ".env", ".env.*", "deploy-config.json"
+        ".env", ".env.*", ".envold", "deploy-config.json"
     )
 
-    $allItems = Get-ChildItem -Path $ProjectPath -Recurse -Force | Where-Object {
+    $allItems = Get-ChildItem -Path $ProjectPath -Recurse -Force -File | Where-Object {
         $rel = $_.FullName.Substring($ProjectPath.Length).TrimStart('\','/')
-        $exclude = $false
+        $segments = $rel -split '[\\/]'
 
-        foreach ($d in $excludeDirs) {
-            if ($rel -like "$d\*" -or $rel -like "$d/*" -or $rel -eq $d) { $exclude = $true; break }
+        # Exclusion si un segment du path est dans la liste
+        $excluded = $false
+        foreach ($seg in $segments) {
+            if ($excludeSegments -contains $seg) { $excluded = $true; break }
         }
-        if (-not $exclude) {
-            foreach ($p in $excludePatterns) { if ($_.Name -like $p) { $exclude = $true; break } }
+        # Exclusion par pattern de nom de fichier
+        if (-not $excluded) {
+            foreach ($p in $excludePatterns) {
+                if ($_.Name -like $p) { $excluded = $true; break }
+            }
         }
-        -not $exclude -and -not $_.PSIsContainer
+        -not $excluded
     }
 
     Write-Info "$($allItems.Count) fichiers a inclure"
 
-    Add-Type -Assembly "System.IO.Compression.FileSystem"
-    $zip = [System.IO.Compression.ZipFile]::Open($zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    # PS5.1 : charger explicitement les DEUX assemblies (ZipArchiveMode est dans
+    # System.IO.Compression, ZipFile est dans System.IO.Compression.FileSystem).
+    # -ErrorAction SilentlyContinue : si deja charge, pas grave.
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+
+    $zip = [System.IO.Compression.ZipFile]::Open(
+        $zipPath,
+        [System.IO.Compression.ZipArchiveMode]::Create
+    )
     try {
         foreach ($item in $allItems) {
             $rel = $item.FullName.Substring($ProjectPath.Length).TrimStart('\','/').Replace('\','/')
@@ -251,8 +268,17 @@ fi
 # Extract + npm install + PM2 (cur principal -- TRES simplifie vs version Python)
 # -----------------------------------------------------------------------------
 function Invoke-CodeDeploy {
-    param($cfg)
-    Write-Step "Extraction + npm install + restart PM2"
+    param(
+        $cfg,
+        [switch]$SkipPm2   # en mode -Init, on laisse Initialize-RemoteEnv demarrer PM2 apres avoir cree le .env
+    )
+    if ($SkipPm2) {
+        Write-Step "Extraction + npm install (PM2 sera demarre apres creation du .env)"
+    } else {
+        Write-Step "Extraction + npm install + restart PM2"
+    }
+
+    if ($SkipPm2) { $doPm2Flag = "0" } else { $doPm2Flag = "1" }
 
     $bashTemplate = @'
 set -e
@@ -260,6 +286,7 @@ set -e
 REMOTE_DIR=__REMOTE_DIR__
 PM2_NAME=__PM2_NAME__
 APP_PORT=__APP_PORT__
+DO_PM2=__DO_PM2__
 
 echo "==> 1. Backup eventuel (.env + data/)"
 mkdir -p "$REMOTE_DIR" 2>/dev/null || true
@@ -293,33 +320,42 @@ cd "$REMOTE_DIR"
 npm install --omit=dev --no-audit --no-fund 2>&1 | tail -5
 echo "[OK] deps Node installees"
 
-echo "==> 6. PM2 delete + start (reset cache env)"
-cd "$REMOTE_DIR"
-pm2 delete "$PM2_NAME" 2>/dev/null || true
-pm2 start ecosystem.config.cjs
-pm2 save > /dev/null
-sleep 2
+if [ "$DO_PM2" = "1" ]; then
+  echo "==> 6. PM2 delete + start (reset cache env)"
+  cd "$REMOTE_DIR"
+  pm2 delete "$PM2_NAME" 2>/dev/null || true
+  pm2 start ecosystem.config.cjs
+  pm2 save > /dev/null
+  sleep 2
 
-echo "==> 7. Health check local"
-HTTP=$(curl -s -o /tmp/health.json -w "%{http_code}" "http://localhost:$APP_PORT/health" || echo "000")
-echo "HTTP: $HTTP"
-if [ "$HTTP" = "200" ]; then
-  echo "[OK] Backend repond sur le port $APP_PORT"
+  echo "==> 7. Health check local"
+  HTTP=$(curl -s -o /tmp/health.json -w "%{http_code}" "http://localhost:$APP_PORT/health" || echo "000")
+  echo "HTTP: $HTTP"
+  if [ "$HTTP" = "200" ]; then
+    echo "[OK] Backend repond sur le port $APP_PORT"
+  else
+    echo "[FAIL] Backend NE repond PAS. Logs PM2 :"
+    pm2 logs "$PM2_NAME" --lines 20 --nostream
+    exit 1
+  fi
 else
-  echo "[FAIL] Backend NE repond PAS. Logs PM2 :"
-  pm2 logs "$PM2_NAME" --lines 20 --nostream
-  exit 1
+  echo "==> 6. PM2 skippe (-Init : sera demarre apres creation du .env)"
 fi
 '@
 
     $bash = $bashTemplate `
         -replace '__REMOTE_DIR__', $REMOTE_DIR `
         -replace '__PM2_NAME__',   $PM2_NAME `
-        -replace '__APP_PORT__',   $APP_PORT
+        -replace '__APP_PORT__',   $APP_PORT `
+        -replace '__DO_PM2__',     $doPm2Flag
 
     $rc = Invoke-SshBashScript $cfg $bash
     if ($rc -ne 0) { throw "Deploy code a echoue (code $rc)" }
-    Write-Ok "Code deploye + PM2 actif + health 200"
+    if ($SkipPm2) {
+        Write-Ok "Code deploye, npm install OK, PM2 sera demarre apres .env"
+    } else {
+        Write-Ok "Code deploye + PM2 actif + health 200"
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -382,6 +418,18 @@ pm2 delete __PM2_NAME__ 2>/dev/null || true
 cd "$REMOTE_DIR"
 pm2 start ecosystem.config.cjs
 pm2 save > /dev/null
+sleep 3
+
+echo "==> Health check apres demarrage avec .env complet"
+HTTP=$(curl -s -o /tmp/health.json -w "%{http_code}" "http://localhost:__APP_PORT__/health" || echo "000")
+echo "HTTP: $HTTP"
+if [ "$HTTP" = "200" ]; then
+  echo "[OK] Backend repond sur le port __APP_PORT__"
+else
+  echo "[FAIL] Backend NE repond PAS. Logs PM2 :"
+  pm2 logs __PM2_NAME__ --lines 30 --nostream
+  exit 1
+fi
 '@
 
     $bash = $bashTemplate `
@@ -458,6 +506,11 @@ server {
 NGINXEOF
 
 sudo ln -sf "$VHOST_PATH" "/etc/nginx/sites-enabled/$FQDN.conf"
+
+echo "[..] chmod : autoriser Nginx (www-data) a traverser /home/ubuntu"
+sudo chmod o+x /home/ubuntu
+sudo chmod -R o+rX "__REMOTE_DIR__/frontend/dist"
+echo "[OK] permissions frontend/dist OK pour Nginx"
 
 echo "[..] nginx -t"
 sudo nginx -t
@@ -537,14 +590,15 @@ Send-DeployPackage $cfg $zipPath
 
 if ($Init) {
     Install-VpsPrerequisites $cfg
-}
-
-Invoke-CodeDeploy $cfg
-
-if ($Init) {
-    Initialize-RemoteEnv $cfg
+    # En mode -Init : on extract le code mais on NE demarre PAS PM2 maintenant
+    # (le .env n'existe pas encore, PM2 prendrait les defaults et le health echouerait)
+    Invoke-CodeDeploy $cfg -SkipPm2
+    Initialize-RemoteEnv $cfg   # cree .env puis PM2 start + health check
     Invoke-NginxSetup $cfg
     Invoke-Certbot $cfg
+} else {
+    # Mise a jour standard : le .env existe deja, PM2 redemarre directement
+    Invoke-CodeDeploy $cfg
 }
 
 Show-PostDeployLogs $cfg
