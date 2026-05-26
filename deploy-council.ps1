@@ -24,6 +24,7 @@ param(
     [switch]$SkipNginx,
     [switch]$SkipCertbot,
     [switch]$LogsAfter,
+    [switch]$UpdateNginx,   # v2.8 : force la regen de la conf Nginx (apres ajout landing)
     [string]$ProjectPath = $PSScriptRoot
 )
 
@@ -315,6 +316,25 @@ echo "==> 4. Restauration .env / data"
 
 sudo chown -R $USER:$USER "$REMOTE_DIR"
 
+echo "==> 4b. Patch .env pour ajouter les vars auth v2.8 si absentes"
+ENV_FILE="$REMOTE_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+  if ! grep -q "^ADMIN_USERNAME=" "$ENV_FILE"; then
+    echo "" >> "$ENV_FILE"
+    echo "# v2.8 -- Auth mono-user" >> "$ENV_FILE"
+    echo "ADMIN_USERNAME=admin" >> "$ENV_FILE"
+    echo "[OK] ADMIN_USERNAME ajoute au .env"
+  fi
+  if ! grep -q "^SESSION_DURATION_DAYS=" "$ENV_FILE"; then
+    echo "SESSION_DURATION_DAYS=30" >> "$ENV_FILE"
+    echo "[OK] SESSION_DURATION_DAYS ajoute au .env"
+  fi
+  if ! grep -q "^NODE_ENV=" "$ENV_FILE"; then
+    echo "NODE_ENV=production" >> "$ENV_FILE"
+    echo "[OK] NODE_ENV=production ajoute au .env (cookie Secure actif)"
+  fi
+fi
+
 echo "==> 5. npm install (backend)"
 cd "$REMOTE_DIR"
 npm install --omit=dev --no-audit --no-fund 2>&1 | tail -5
@@ -407,8 +427,13 @@ DATA_DIR=data/conversations
 HOST=127.0.0.1
 PORT=__APP_PORT__
 LOG_LEVEL=info
+NODE_ENV=production
 
 CORS_ORIGINS=https://$FQDN
+
+# v2.8 -- Auth mono-user (admin + OPENROUTER_API_KEY)
+ADMIN_USERNAME=admin
+SESSION_DURATION_DAYS=30
 ENVEOF
 
 chmod 600 "$REMOTE_DIR/.env"
@@ -498,7 +523,15 @@ server {
         proxy_pass http://127.0.0.1:$APP_PORT/health;
     }
 
-    # --- SPA fallback ---
+    # --- Landing page sur la racine exacte (v2.8) ---
+    # Si l'utilisateur arrive sur https://council.mesoutilsagile.com/, on lui
+    # sert la landing statique. Le bouton CTA pointe vers /app qui retombe
+    # dans le SPA fallback ci-dessous.
+    location = / {
+        try_files /landing.html =404;
+    }
+
+    # --- SPA fallback (app React + page Login) ---
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -599,6 +632,12 @@ if ($Init) {
 } else {
     # Mise a jour standard : le .env existe deja, PM2 redemarre directement
     Invoke-CodeDeploy $cfg
+
+    # v2.8 : -UpdateNginx force la regen de la conf Nginx
+    # (utile apres l'ajout de la landing pour activer location = /)
+    if ($UpdateNginx) {
+        Invoke-NginxSetup $cfg
+    }
 }
 
 Show-PostDeployLogs $cfg

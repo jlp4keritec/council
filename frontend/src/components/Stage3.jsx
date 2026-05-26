@@ -10,61 +10,62 @@ export default function Stage3({ result, stageDurationMs }) {
   const hasAnalysis = result.analysis && typeof result.analysis === 'object';
 
   return (
-    <div className="stage-section">
-      <div className="stage-title">
-        Étape 3 — Synthèse finale (Chairman)
-        <span className="stage-status">
-          {shortModelName(result.model)}
+    <section className="pane pane-chairman">
+      <div className="pane-head tinted-blue">
+        <div className="pane-head-row">
+          <span className="stage-chip"><span className="n">3</span>chairman</span>
+          <h3>Synthèse</h3>
+          {stageDurationMs != null && (
+            <span className="pane-dur"><strong>{formatDuration(stageDurationMs)}</strong></span>
+          )}
+        </div>
+        <span className="pane-sub">
+          arbitrée par {shortModelName(result.model)}
           {result.used_fallback && (
-            <span className="fallback-tag" title="Chairman principal indisponible, fallback automatique">
-              fallback
-            </span>
+            <span className="fallback-tag" title="Chairman principal indisponible, fallback automatique">fallback</span>
           )}
           {result.parse_method === 'fallback_text' && (
-            <span className="fallback-tag" title="Le modèle n'a pas respecté le format JSON, analyse non disponible">
-              raw
-            </span>
+            <span className="fallback-tag" title="Le modèle n'a pas respecté le format JSON, analyse non disponible">raw</span>
           )}
         </span>
-        {stageDurationMs != null && (
-          <span className="stage-duration">{formatDuration(stageDurationMs)}</span>
-        )}
       </div>
 
-      {hasAnalysis && (
-        <div className="tabs">
-          <button
-            className={`tab ${active === 'synthesis' ? 'active' : ''}`}
-            onClick={() => setActive('synthesis')}
-          >
-            Synthèse
-          </button>
-          <button
-            className={`tab ${active === 'analysis' ? 'active' : ''}`}
-            onClick={() => setActive('analysis')}
-          >
-            Analyse du Chairman
-            <span className="tab-badge tab-badge-analysis" title="Raisonnement méta-cognitif">↗</span>
-          </button>
-        </div>
-      )}
-
-      {active === 'synthesis' && (
-        <div className="tab-content chairman">
-          <div className="markdown-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {result.response}
-            </ReactMarkdown>
+      <div className="pane-body">
+        {hasAnalysis && (
+          <div className="tabs">
+            <button
+              className={`tab ${active === 'synthesis' ? 'active' : ''}`}
+              onClick={() => setActive('synthesis')}
+            >
+              Synthèse
+            </button>
+            <button
+              className={`tab ${active === 'analysis' ? 'active' : ''}`}
+              onClick={() => setActive('analysis')}
+            >
+              Analyse du Chairman
+              <span className="tab-badge tab-badge-analysis" title="Raisonnement méta-cognitif">↗</span>
+            </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {active === 'analysis' && hasAnalysis && (
-        <div className="tab-content chairman-analysis">
-          <ChairmanAnalysis analysis={result.analysis} />
-        </div>
-      )}
-    </div>
+        {active === 'synthesis' && (
+          <div className="tab-content chairman">
+            <div className="markdown-content">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                {result.response}
+              </ReactMarkdown>
+            </div>
+          </div>
+        )}
+
+        {active === 'analysis' && hasAnalysis && (
+          <div className="tab-content chairman-analysis">
+            <ChairmanAnalysis analysis={result.analysis} />
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -98,9 +99,7 @@ function ChairmanAnalysis({ analysis }) {
             <span className="analysis-count">{consensus.length}</span>
           </div>
           <ul className="analysis-list">
-            {consensus.map((point, i) => (
-              <li key={i}>{point}</li>
-            ))}
+            {consensus.map((point, i) => (<li key={i}>{point}</li>))}
           </ul>
         </div>
       )}
@@ -120,9 +119,7 @@ function ChairmanAnalysis({ analysis }) {
                   <div className="analysis-disagreement-positions"><strong>Positions :</strong> {d.positions}</div>
                 )}
                 {d.my_arbitration && (
-                  <div className="analysis-disagreement-arbitration">
-                    <strong>Arbitrage :</strong> {d.my_arbitration}
-                  </div>
+                  <div className="analysis-disagreement-arbitration"><strong>Arbitrage :</strong> {d.my_arbitration}</div>
                 )}
               </div>
             ))}
@@ -138,9 +135,7 @@ function ChairmanAnalysis({ analysis }) {
             <span className="analysis-count">{rejected.length}</span>
           </div>
           <ul className="analysis-list">
-            {rejected.map((arg, i) => (
-              <li key={i}>{arg}</li>
-            ))}
+            {rejected.map((arg, i) => (<li key={i}>{arg}</li>))}
           </ul>
         </div>
       )}

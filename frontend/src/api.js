@@ -1,14 +1,29 @@
 // Client API LLM Council.
 // En dev : /api est proxy vers localhost:8001 (cf. vite.config.js)
-// En prod : Nginx route /api vers le backend FastAPI sur localhost:8001
+// En prod : Nginx route /api vers le backend Fastify sur localhost:5706
+//
+// V2.8 : credentials: 'include' partout pour que le cookie d'auth soit envoye.
+// Au moindre 401, on redirige vers /login (sauf sur les endpoints auth eux-memes
+// pour eviter une boucle).
 
 const API_BASE = '/api';
+
+const AUTH_PATHS = ['/auth/login', '/auth/me', '/auth/logout'];
 
 async function jsonRequest(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    credentials: 'include',     // ENVOYER les cookies
     ...options,
   });
+
+  // Auto-redirect sur 401 (sauf si on est sur un endpoint auth)
+  if (response.status === 401 && !AUTH_PATHS.some((p) => path.startsWith(p))) {
+    // Notifier l'app qu'il faut afficher Login
+    window.dispatchEvent(new CustomEvent('auth-required'));
+    throw new Error('UNAUTHORIZED');
+  }
+
   if (!response.ok) {
     const text = await response.text().catch(() => '');
     throw new Error(`API ${response.status}: ${text}`);
@@ -17,13 +32,25 @@ async function jsonRequest(path, options = {}) {
 }
 
 export const api = {
+  // ------------------- AUTH -------------------
+  authMe: () => jsonRequest('/auth/me'),
+
+  authLogin: (username, password) =>
+    jsonRequest('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+
+  authLogout: () =>
+    jsonRequest('/auth/logout', { method: 'POST', body: JSON.stringify({}) }),
+
+  // ------------------- CONFIG / USAGE -------------------
   getConfig: () => jsonRequest('/config'),
 
   getUsage: () => jsonRequest('/usage'),
 
   /**
    * Recherche dans la liste des modeles OpenRouter (cache cote serveur 1h).
-   * @param {object} opts {search, pricing: 'all'|'free'|'paid', limit}
    */
   getModels: ({ search = '', pricing = 'all', limit = 50 } = {}) => {
     const params = new URLSearchParams();
@@ -35,9 +62,7 @@ export const api = {
   },
 
   /**
-   * Health check d'une liste de modeles. Consomme 1 requete de quota par
-   * modele non-cache (cache serveur de 5 min, bypass avec forceRefresh).
-   * @returns {Promise<{results, summary}>}
+   * Health check d'une liste de modeles.
    */
   checkHealth: (models, forceRefresh = false) =>
     jsonRequest('/models/health', {
@@ -45,6 +70,7 @@ export const api = {
       body: JSON.stringify({ models, force_refresh: forceRefresh }),
     }),
 
+  // ------------------- CONVERSATIONS -------------------
   listConversations: () => jsonRequest('/conversations'),
 
   createConversation: () =>
@@ -55,11 +81,6 @@ export const api = {
   deleteConversation: (id) =>
     jsonRequest(`/conversations/${id}`, { method: 'DELETE' }),
 
-  /**
-   * Build l'URL d'export d'un message. format = md|json|docx|pptx.
-   * Le frontend laisse simplement le navigateur télécharger en visitant cette URL
-   * (pas besoin de gérer le buffer côté JS).
-   */
   exportUrl: (conversationId, format, messageIndex) => {
     const params = new URLSearchParams({ format });
     if (messageIndex != null) params.set('message_index', String(messageIndex));
@@ -68,10 +89,6 @@ export const api = {
 
   /**
    * Streaming pipeline council via SSE.
-   * @param {string} conversationId
-   * @param {string} content
-   * @param {(event: object) => void} onEvent  callback appele a chaque event SSE
-   * @param {object} override  optionnel : {council_models, chairman_model, title_model, eval_criteria}
    */
   async sendMessageStream(conversationId, content, onEvent, override = null) {
     const body = { content };
@@ -82,13 +99,16 @@ export const api = {
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(body),
       },
     );
 
-    if (!response.ok) {
-      throw new Error(`API ${response.status}`);
+    if (response.status === 401) {
+      window.dispatchEvent(new CustomEvent('auth-required'));
+      throw new Error('UNAUTHORIZED');
     }
+    if (!response.ok) throw new Error(`API ${response.status}`);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -97,12 +117,9 @@ export const api = {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       buffer += decoder.decode(value, { stream: true });
-
       const events = buffer.split('\n\n');
       buffer = events.pop() || '';
-
       for (const evt of events) {
         const lines = evt.split('\n');
         for (const line of lines) {

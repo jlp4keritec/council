@@ -2,29 +2,43 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '../api.js';
 import { shortModelName } from '../utils.js';
 
-// Presets rapides
+// Presets rapides — 3 conseils a familles decorrelees (slugs :free verifies sur OpenRouter)
 const PRESETS = {
-  free: {
-    label: 'Free (gratuit, lent)',
+  diversite: {
+    label: 'Diversité max',
+    hint: 'DeepSeek · Qwen · Meta · Z.ai — arbitre OpenAI',
+    council_models: [
+      'deepseek/deepseek-r1:free',
+      'qwen/qwen3-235b-a22b:free',
+      'meta-llama/llama-4-maverick:free',
+      'z-ai/glm-4.5-air:free',
+    ],
+    chairman_model: 'openai/gpt-oss-120b:free',
+    title_model: 'openai/gpt-oss-120b:free',
+  },
+  raisonnement: {
+    label: 'Raisonnement',
+    hint: 'DeepSeek V4 · Qwen · NVIDIA · Arcee — arbitre Meta',
+    council_models: [
+      'deepseek/deepseek-v4-flash:free',
+      'qwen/qwen3-235b-a22b:free',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'arcee-ai/trinity-large-thinking:free',
+    ],
+    chairman_model: 'meta-llama/llama-4-maverick:free',
+    title_model: 'openai/gpt-oss-120b:free',
+  },
+  actuel: {
+    label: 'Conseil actuel',
+    hint: 'Tes 4 membres — arbitre GLM indépendant',
     council_models: [
       'deepseek/deepseek-r1:free',
       'qwen/qwen3-coder-480b:free',
       'meta-llama/llama-4-maverick:free',
       'openai/gpt-oss-120b:free',
     ],
-    chairman_model: 'openrouter/free',
-    title_model: 'openrouter/free',
-  },
-  premium: {
-    label: 'Premium (top-tier payant, rapide)',
-    council_models: [
-      'openai/gpt-5.1',
-      'google/gemini-3-pro-preview',
-      'anthropic/claude-sonnet-4.5',
-      'x-ai/grok-4',
-    ],
-    chairman_model: 'anthropic/claude-opus-4.6',
-    title_model: 'google/gemini-2.5-flash',
+    chairman_model: 'z-ai/glm-4.5-air:free',
+    title_model: 'openai/gpt-oss-120b:free',
   },
 };
 
@@ -189,16 +203,23 @@ export default function ModelSelector({ isOpen, onClose, currentOverride, server
         <div className="modal-body">
           {/* Presets */}
           <div className="config-section">
-            <div className="config-section-title">Presets rapides</div>
+            <div className="config-section-title">Conseils prédéfinis</div>
             <div className="preset-buttons">
-              <button className="preset-btn" onClick={() => applyPreset('free')}>
-                {PRESETS.free.label}
-              </button>
-              <button className="preset-btn" onClick={() => applyPreset('premium')}>
-                {PRESETS.premium.label}
-              </button>
+              {Object.entries(PRESETS).map(([key, p]) => (
+                <button
+                  key={key}
+                  className="preset-btn"
+                  onClick={() => applyPreset(key)}
+                  title={p.hint}
+                >
+                  {p.label}
+                  <small style={{ display: 'block', fontWeight: 400, opacity: 0.65, fontSize: '10px', marginTop: '2px' }}>
+                    {p.hint}
+                  </small>
+                </button>
+              ))}
               <button className="preset-btn preset-btn-reset" onClick={resetToServerDefaults}>
-                Reset aux defaults .env
+                Défaut (.env serveur)
               </button>
             </div>
           </div>

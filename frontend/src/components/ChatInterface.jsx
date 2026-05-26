@@ -5,29 +5,31 @@ import Stage1 from './Stage1.jsx';
 import Stage2 from './Stage2.jsx';
 import Stage3 from './Stage3.jsx';
 
+const VIEW_KEY = 'council-view';
+function loadView() {
+  try { return localStorage.getItem(VIEW_KEY) === 'lecture' ? 'lecture' : 'tableau'; }
+  catch { return 'tableau'; }
+}
+
+/* Barre de metriques pleine largeur sous le board (temps + tokens + cout) */
 function MetricsBlock({ pricing, timings }) {
   if (!pricing && !timings) return null;
   const total = pricing?.total;
-
   return (
     <div className="metrics-block">
       {timings && (
         <div className="metrics-row">
           <strong>Temps :</strong>{' '}
-          <span>Stage 1 <code>{formatDuration(timings.stage1_ms)}</code></span>
-          {' · '}
-          <span>Stage 2 <code>{formatDuration(timings.stage2_ms)}</code></span>
-          {' · '}
-          <span>Stage 3 <code>{formatDuration(timings.stage3_ms)}</code></span>
-          {' · '}
+          <span>Stage 1 <code>{formatDuration(timings.stage1_ms)}</code></span>{' · '}
+          <span>Stage 2 <code>{formatDuration(timings.stage2_ms)}</code></span>{' · '}
+          <span>Stage 3 <code>{formatDuration(timings.stage3_ms)}</code></span>{' · '}
           <strong>Total <code>{formatDuration(timings.total_ms)}</code></strong>
         </div>
       )}
       {total && (
         <div className="metrics-row">
           <strong>Tokens :</strong>{' '}
-          {total.total_tokens.toLocaleString('fr-FR')}
-          {' '}
+          {total.total_tokens.toLocaleString('fr-FR')}{' '}
           <span style={{ color: 'var(--text-secondary)' }}>
             ({total.total_prompt_tokens} in / {total.total_completion_tokens} out)
           </span>
@@ -43,19 +45,39 @@ function MetricsBlock({ pricing, timings }) {
   );
 }
 
+/* Panneau squelette (chargement / en attente) — garde la grille a 3 colonnes stable */
+function PaneSkeleton({ n, title, tinted, loading }) {
+  return (
+    <section className={`pane pane-skeleton ${tinted ? 'pane-chairman' : ''}`}>
+      <div className={`pane-head ${tinted ? 'tinted-blue' : ''}`}>
+        <div className="pane-head-row">
+          <span className={`stage-chip ${n === 2 ? 'red' : ''}`}><span className="n">{n}</span>{n === 1 ? 'conseil' : n === 2 ? 'éval.' : 'chairman'}</span>
+          <h3>{title}</h3>
+        </div>
+      </div>
+      <div className="pane-body">
+        {loading ? (<><span className="spinner" /> En cours…</>) : 'En attente…'}
+      </div>
+    </section>
+  );
+}
+
 export default function ChatInterface({ conversationId, onMessageSent, override }) {
   const [conversation, setConversation] = useState(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState(null);
   const [streamingMessage, setStreamingMessage] = useState(null);
+  const [view, setView] = useState(loadView);
   const messagesEndRef = useRef(null);
 
+  function changeView(v) {
+    setView(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* ignore */ }
+  }
+
   useEffect(() => {
-    if (!conversationId) {
-      setConversation(null);
-      return;
-    }
+    if (!conversationId) { setConversation(null); return; }
     api.getConversation(conversationId).then(setConversation).catch(console.error);
     setStreamingMessage(null);
     setError(null);
@@ -80,15 +102,9 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
 
     const inProgress = {
       role: 'assistant',
-      stage1: null,
-      stage2: null,
-      stage3: null,
-      metadata: null,
-      pricing: null,
-      timings: null,
-      stage1DurationMs: null,
-      stage2DurationMs: null,
-      stage3DurationMs: null,
+      stage1: null, stage2: null, stage3: null,
+      metadata: null, pricing: null, timings: null,
+      stage1DurationMs: null, stage2DurationMs: null, stage3DurationMs: null,
       failed_models_stage1: null,
       currentStage: 'stage1_start',
     };
@@ -135,21 +151,12 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
         });
       }, override);
 
-      // Si erreur fatale pendant le streaming, on garde le streamingMessage
-      // pour afficher l'erreur dans la conversation (sinon page blanche).
       const fresh = await api.getConversation(conversationId);
       setConversation(fresh);
-
-      // On ne reset le streamingMessage QUE si le pipeline a vraiment abouti
-      // (au moins un message assistant cree cote serveur). Sinon on garde
-      // le streamingMessage avec son fatal_error pour que l'utilisateur voie quoi.
       setStreamingMessage((prev) => {
         if (!prev) return null;
         const lastMsg = fresh?.messages?.[fresh.messages.length - 1];
-        if (lastMsg && lastMsg.role === 'assistant') {
-          return null;   // message ok persiste cote serveur, on bascule sur fresh
-        }
-        // Erreur fatale ou rien : on conserve le streamingMessage avec l'erreur visible
+        if (lastMsg && lastMsg.role === 'assistant') return null;
         return prev;
       });
       onMessageSent?.();
@@ -162,15 +169,12 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
   }
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   }
 
   if (!conversationId) {
     return (
-      <div className="main">
+      <div className={`main mode-${view}`}>
         <div className="welcome">
           <h2>Bienvenue dans LLM Council</h2>
           <p>Sélectionne une conversation ou crée-en une nouvelle.</p>
@@ -183,25 +187,45 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
   const allMessages = streamingMessage ? [...messages, streamingMessage] : messages;
 
   return (
-    <div className="main">
+    <div className={`main mode-${view}`}>
+      <div className="main-header">
+        <div className="main-header-title">
+          {conversation?.title || <span className="muted">Nouvelle conversation</span>}
+        </div>
+        <div className="viewtoggle" role="group" aria-label="Disposition">
+          <button
+            className={view === 'lecture' ? 'active' : ''}
+            onClick={() => changeView('lecture')}
+            title="Lecture — une colonne"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg>
+            Lecture
+          </button>
+          <button
+            className={view === 'tableau' ? 'active' : ''}
+            onClick={() => changeView('tableau')}
+            title="Tableau — trois panneaux"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="9.5" y="4" width="5" height="16" rx="1"/><rect x="16" y="4" width="5" height="16" rx="1"/></svg>
+            Tableau
+          </button>
+        </div>
+      </div>
+
       <div className="chat-messages">
         {allMessages.map((msg, i) => (
           <div key={i} className="message">
             {msg.role === 'user' ? (
-              <div className="message-user markdown-content">{msg.content}</div>
+              <div className="message-user">{msg.content}</div>
             ) : (
-              <AssistantMessage
-                msg={msg}
-                conversationId={conversationId}
-                messageIndex={i}
-              />
+              <AssistantMessage msg={msg} conversationId={conversationId} messageIndex={i} />
             )}
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
 
-      {error && <div className="error-banner" style={{ margin: '0 20px' }}>{error}</div>}
+      {error && <div className="error-banner" style={{ margin: '0 24px' }}>{error}</div>}
 
       {streaming ? (
         <div className="pipeline-status-bar">
@@ -219,9 +243,7 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
               onKeyDown={handleKeyDown}
               placeholder="Pose ta question au Council… (Entrée pour envoyer, Maj+Entrée pour nouvelle ligne)"
             />
-            <button onClick={handleSend} disabled={!input.trim()}>
-              Envoyer
-            </button>
+            <button onClick={handleSend} disabled={!input.trim()}>Envoyer</button>
           </div>
         </div>
       )}
@@ -230,30 +252,24 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
 }
 
 function AssistantMessage({ msg, conversationId, messageIndex }) {
-  const stage1Loading = !msg.stage1 && msg.currentStage === 'stage1_start';
-  const stage2Loading = msg.stage1 && !msg.stage2 && (msg.currentStage === 'stage2_start' || msg.currentStage === 'stage1_complete');
-  const stage3Loading = msg.stage2 && !msg.stage3 && (msg.currentStage === 'stage3_start' || msg.currentStage === 'stage2_complete');
-
-  // Pour les messages persistes (rechargement de la conv), on lit timings depuis msg.timings
   const stage1Duration = msg.stage1DurationMs ?? msg.timings?.stage1_ms;
   const stage2Duration = msg.stage2DurationMs ?? msg.timings?.stage2_ms;
   const stage3Duration = msg.stage3DurationMs ?? msg.timings?.stage3_ms;
 
-  // Le message est complet quand on a stage3 (= synthese finale produite)
   const isComplete = msg.stage3 && msg.stage3.response;
 
-  // Erreur fatale (Stage 1 = 0 reponses, quota OpenRouter, etc.)
   if (msg.fatal_error) {
     return (
       <div className="message-assistant">
-        <FatalErrorBlock
-          message={msg.fatal_error}
-          code={msg.fatal_error_code}
-          recentErrors={msg.recent_errors}
-        />
+        <FatalErrorBlock message={msg.fatal_error} code={msg.fatal_error_code} recentErrors={msg.recent_errors} />
       </div>
     );
   }
+
+  // Etats de chargement par stage (squelettes pour garder 3 colonnes stables)
+  const s1Loading = !msg.stage1 && msg.currentStage === 'stage1_start';
+  const s2Loading = msg.stage1 && !msg.stage2 && (msg.currentStage === 'stage2_start' || msg.currentStage === 'stage1_complete');
+  const s3Loading = msg.stage2 && !msg.stage3 && (msg.currentStage === 'stage3_start' || msg.currentStage === 'stage2_complete');
 
   return (
     <div className="message-assistant">
@@ -261,47 +277,36 @@ function AssistantMessage({ msg, conversationId, messageIndex }) {
         <ExportMenu conversationId={conversationId} messageIndex={messageIndex} />
       )}
 
-      {stage1Loading && (
-        <div className="stage-section">
-          <div className="stage-title">
-            Étape 1 — Opinions individuelles <span className="spinner" />
-          </div>
-        </div>
-      )}
-      <Stage1
-        results={msg.stage1}
-        aggregateRankings={msg.metadata?.aggregate_rankings}
-        stageDurationMs={stage1Duration}
-        failedModels={msg.failed_models_stage1 ?? msg.metadata?.failed_models_stage1}
-        attemptedFallback={msg.attempted_fallback ?? msg.metadata?.attempted_fallback}
-        reachedMinimum={msg.reached_minimum ?? msg.metadata?.reached_minimum}
-        minResponsesTarget={msg.min_responses_target ?? msg.metadata?.min_responses_target}
-      />
+      <div className="board">
+        {/* Panneau 1 — Conseil */}
+        {msg.stage1 ? (
+          <Stage1
+            results={msg.stage1}
+            aggregateRankings={msg.metadata?.aggregate_rankings}
+            stageDurationMs={stage1Duration}
+            failedModels={msg.failed_models_stage1 ?? msg.metadata?.failed_models_stage1}
+            attemptedFallback={msg.attempted_fallback ?? msg.metadata?.attempted_fallback}
+            reachedMinimum={msg.reached_minimum ?? msg.metadata?.reached_minimum}
+            minResponsesTarget={msg.min_responses_target ?? msg.metadata?.min_responses_target}
+          />
+        ) : (
+          <PaneSkeleton n={1} title="Avis" loading={s1Loading} />
+        )}
 
-      {stage2Loading && (
-        <div className="stage-section">
-          <div className="stage-title">
-            Étape 2 — Évaluation croisée <span className="spinner" />
-          </div>
-        </div>
-      )}
-      <Stage2
-        results={msg.stage2}
-        metadata={msg.metadata}
-        stageDurationMs={stage2Duration}
-      />
+        {/* Panneau 2 — Classement */}
+        {msg.stage2 ? (
+          <Stage2 results={msg.stage2} metadata={msg.metadata} stageDurationMs={stage2Duration} />
+        ) : (
+          <PaneSkeleton n={2} title="Classement" loading={s2Loading} />
+        )}
 
-      {stage3Loading && (
-        <div className="stage-section">
-          <div className="stage-title">
-            Étape 3 — Synthèse finale <span className="spinner" />
-          </div>
-        </div>
-      )}
-      <Stage3
-        result={msg.stage3}
-        stageDurationMs={stage3Duration}
-      />
+        {/* Panneau 3 — Synthèse */}
+        {msg.stage3 && msg.stage3.response ? (
+          <Stage3 result={msg.stage3} stageDurationMs={stage3Duration} />
+        ) : (
+          <PaneSkeleton n={3} title="Synthèse" tinted loading={s3Loading} />
+        )}
+      </div>
 
       <MetricsBlock pricing={msg.pricing} timings={msg.timings} />
     </div>
@@ -309,12 +314,11 @@ function AssistantMessage({ msg, conversationId, messageIndex }) {
 }
 
 function ExportMenu({ conversationId, messageIndex }) {
-  const [copyStatus, setCopyStatus] = useState(null);   // null | 'copying' | 'copied' | 'error'
+  const [copyStatus, setCopyStatus] = useState(null);
 
   async function handleCopyMarkdown() {
     setCopyStatus('copying');
     try {
-      // Telecharge le MD via fetch puis copie dans le presse-papier
       const url = api.exportUrl(conversationId, 'md', messageIndex);
       const res = await fetch(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -330,57 +334,23 @@ function ExportMenu({ conversationId, messageIndex }) {
   }
 
   function handleDownload(format) {
-    const url = api.exportUrl(conversationId, format, messageIndex);
-    // Le navigateur recoit Content-Disposition: attachment et telecharge
-    window.location.href = url;
+    window.location.href = api.exportUrl(conversationId, format, messageIndex);
   }
 
   return (
     <div className="export-menu" title="Exporter cette réponse">
-      <button
-        className="export-btn"
-        onClick={handleCopyMarkdown}
-        disabled={copyStatus === 'copying'}
-        title="Copier la synthèse complète en Markdown dans le presse-papier"
-      >
+      <button className="export-btn" onClick={handleCopyMarkdown} disabled={copyStatus === 'copying'}
+        title="Copier la synthèse complète en Markdown">
         {copyStatus === 'copied' ? '✓ Copié' : copyStatus === 'error' ? '✗ Erreur' : '📋 Markdown'}
       </button>
-      <button
-        className="export-btn"
-        onClick={() => handleDownload('md')}
-        title="Télécharger en .md"
-      >
-        ⬇ .md
-      </button>
-      <button
-        className="export-btn"
-        onClick={() => handleDownload('json')}
-        title="Télécharger les données brutes en JSON (audit-trail complet)"
-      >
-        ⬇ .json
-      </button>
-      <button
-        className="export-btn export-btn-primary"
-        onClick={() => handleDownload('docx')}
-        title="Télécharger en Word (.docx) — livrable pour client/avocat"
-      >
-        ⬇ .docx
-      </button>
-      <button
-        className="export-btn"
-        onClick={() => handleDownload('pptx')}
-        title="Télécharger en PowerPoint (.pptx) — présentation slides"
-      >
-        ⬇ .pptx
-      </button>
+      <button className="export-btn" onClick={() => handleDownload('md')} title="Télécharger en .md">⬇ .md</button>
+      <button className="export-btn" onClick={() => handleDownload('json')} title="Télécharger les données brutes en JSON">⬇ .json</button>
+      <button className="export-btn export-btn-primary" onClick={() => handleDownload('docx')} title="Télécharger en Word (.docx)">⬇ .docx</button>
+      <button className="export-btn" onClick={() => handleDownload('pptx')} title="Télécharger en PowerPoint (.pptx)">⬇ .pptx</button>
     </div>
   );
 }
 
-/**
- * Bloc d'erreur fatale affiché à la place du message assistant quand
- * tous les modèles ont échoué (typiquement quota OpenRouter atteint).
- */
 function FatalErrorBlock({ message, code, recentErrors }) {
   return (
     <div className="fatal-error-block">
@@ -390,16 +360,11 @@ function FatalErrorBlock({ message, code, recentErrors }) {
         {code && <span className="fatal-error-code">{code}</span>}
       </div>
       <div className="fatal-error-message">
-        {message.split('\n').map((line, i) => (
-          <div key={i}>{line || '\u00A0'}</div>
-        ))}
+        {message.split('\n').map((line, i) => (<div key={i}>{line || '\u00A0'}</div>))}
       </div>
       {code === 'quota_free_daily' && (
         <div className="fatal-error-cta">
-          <button
-            className="fatal-error-action"
-            onClick={() => window.dispatchEvent(new CustomEvent('open-quota-help'))}
-          >
+          <button className="fatal-error-action" onClick={() => window.dispatchEvent(new CustomEvent('open-quota-help'))}>
             📖 Voir les options pour débloquer le quota
           </button>
         </div>
@@ -409,9 +374,7 @@ function FatalErrorBlock({ message, code, recentErrors }) {
           <summary>Détail des erreurs ({recentErrors.length})</summary>
           <ul>
             {recentErrors.map((e, i) => (
-              <li key={i}>
-                <code>{e.model}</code> — HTTP {e.status} — <em>{e.code}</em>
-              </li>
+              <li key={i}><code>{e.model}</code> — HTTP {e.status} — <em>{e.code}</em></li>
             ))}
           </ul>
         </details>

@@ -4,10 +4,8 @@ import { formatDateTooltip } from '../utils.js';
 
 const MAX_SLOTS = 20;
 
-// Cle localStorage utilisee par App.jsx + ModelSelector pour stocker l'override
-// de council. On la relit ici pour que la sidebar interroge /api/usage avec la
-// bonne config (et que le quota refletera la config active).
-const COUNCIL_OVERRIDE_KEY = 'council_override_v1';
+// Cle localStorage utilisee par ModelSelector pour stocker l override.
+const COUNCIL_OVERRIDE_KEY = 'llm-council-config-override';
 
 function readCouncilOverride() {
   try {
@@ -19,7 +17,6 @@ function readCouncilOverride() {
   }
 }
 
-// Helper : fetch /api/usage avec query params si override actif
 async function fetchUsageWithOverride() {
   const override = readCouncilOverride();
   const params = new URLSearchParams();
@@ -33,23 +30,24 @@ async function fetchUsageWithOverride() {
     params.set('title_model', override.title_model);
   }
   const qs = params.toString();
-  // On utilise api.getUsage() en l'absence d'override (retro-compatible) sinon
-  // un fetch direct (vite proxy redirige /api vers le backend en dev, meme
-  // origine en prod).
   if (!qs) return api.getUsage();
-  const res = await fetch(`/api/usage?${qs}`);
+  const res = await fetch(`/api/usage?${qs}`, { credentials: 'include' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
 }
 
-// Force le backend a recharger le statut OpenRouter (utile apres depot de 10$)
 async function refreshOpenRouterStatus() {
   try {
-    await fetch('/api/usage/refresh', { method: 'POST' });
+    await fetch('/api/usage/refresh', { method: 'POST', credentials: 'include' });
   } catch (_err) { /* silencieux */ }
 }
 
-export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpenQuotaHelp, refreshKey, hasOverride }) {
+export default function Sidebar({
+  activeId, onSelect, onNew,
+  onOpenConfig, onOpenQuotaHelp,
+  refreshKey, hasOverride,
+  authUser, onLogout,
+}) {
   const [conversations, setConversations] = useState([]);
   const [config, setConfig] = useState(null);
   const [usage, setUsage] = useState(null);
@@ -58,7 +56,7 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
   useEffect(() => {
     api.listConversations().then(setConversations).catch(console.error);
     fetchUsageWithOverride().then(setUsage).catch(console.error);
-  }, [refreshKey, hasOverride]);   // re-fetch quand l'override change
+  }, [refreshKey, hasOverride]);
 
   useEffect(() => {
     api.getConfig().then(setConfig).catch(console.error);
@@ -84,20 +82,19 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
     if (activeId === id) onSelect(null);
   }
 
-  // Limite a MAX_SLOTS conversations affichees (les + recentes)
-  // listConversations() renvoie deja les + recentes en premier
-  const visibleConvs = conversations.slice(0, MAX_SLOTS);
+  function handleLogoutClick() {
+    if (!confirm('Se déconnecter ?')) return;
+    onLogout?.();
+  }
 
-  // Construit 20 slots : remplis avec les conversations, vides apres
+  const visibleConvs = conversations.slice(0, MAX_SLOTS);
   const slots = Array.from({ length: MAX_SLOTS }, (_, i) => ({
     index: i + 1,
     conv: visibleConvs[i] || null,
   }));
 
-  // Quota status (utilise la nouvelle struct `quota` si presente, sinon
-  // fallback sur les anciens champs retro-compatibles)
   const quotaMode = usage?.quota?.mode || 'unknown';
-  const quotaLimit = usage?.quota?.limit;                              // null = mode payant
+  const quotaLimit = usage?.quota?.limit;
   const showProgressBar = usage?.quota?.show_progress_bar ?? true;
   const questionsToday = usage?.questions_today || 0;
   const quotaPercent = quotaLimit != null && quotaLimit > 0
@@ -107,7 +104,6 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
   const quotaWarning = !quotaReached && quotaPercent >= 80;
   const isPaidMode = quotaMode === 'paid_or_mixed';
 
-  // Badge mode affiche
   const modeBadge = {
     free_no_credit: { text: 'Free · sans credit', cls: 'quota-badge-free' },
     free_with_credit: { text: 'Free · credit depose', cls: 'quota-badge-credit' },
@@ -178,7 +174,6 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
             )}
           </div>
 
-          {/* Barre de progression — uniquement si pas en mode payant */}
           {!isPaidMode && showProgressBar && (
             <div className="sidebar-quota-bar">
               <div
@@ -188,7 +183,6 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
             </div>
           )}
 
-          {/* Ligne mode + bouton refresh OpenRouter */}
           <div className="sidebar-quota-mode-info">
             {modeBadge && (
               <span className={`quota-badge ${modeBadge.cls}`}>{modeBadge.text}</span>
@@ -203,7 +197,6 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
             </button>
           </div>
 
-          {/* Messages contextuels */}
           {quotaReached && (
             <div className="sidebar-quota-alert">⚠ Quota atteint — clique pour les options</div>
           )}
@@ -230,10 +223,37 @@ export default function Sidebar({ activeId, onSelect, onNew, onOpenConfig, onOpe
         </button>
       </div>
 
-      {config && (
+      {(config || true) && (
         <div className="sidebar-footer">
-          <div>{config.council_models.length} modèles · chairman {config.chairman_is_external ? '(externe)' : '(membre)'}</div>
+          {config && (
+            <div>{config.council_models.length} modèles · chairman {config.chairman_is_external ? '(externe)' : '(membre)'}</div>
+          )}
           {hasOverride && <div className="sidebar-override-notice">Override actif (⚙)</div>}
+          <div
+            className="sidebar-version"
+            onClick={() => window.dispatchEvent(new CustomEvent('open-about'))}
+            title="À propos / changelog"
+            style={{ marginTop: 6, cursor: 'pointer', fontFamily: "'Geist Mono', monospace", fontSize: 10, opacity: 0.7 }}
+          >
+            LLM Council v{__APP_VERSION__}
+          </div>
+        </div>
+      )}
+
+      {/* Bandeau user + logout (v2.8) */}
+      {(authUser || onLogout) && (
+        <div className="sidebar-auth">
+          <div className="sidebar-auth-user">
+            <span className="sidebar-auth-dot"></span>
+            <span className="sidebar-auth-name">{authUser || 'Connecté'}</span>
+          </div>
+          <button
+            className="sidebar-auth-logout"
+            onClick={handleLogoutClick}
+            title="Se déconnecter"
+          >
+            Déconnexion
+          </button>
         </div>
       )}
     </div>

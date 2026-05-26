@@ -1,16 +1,19 @@
 // Fastify backend pour le LLM Council.
 //
+// V2.8 :
+// - Auth mono-user (admin + OPENROUTER_API_KEY) via cookie HMAC httpOnly
+// - Routes /api/auth/login, /api/auth/logout, /api/auth/me
+// - Toutes les autres /api/* sont protegees par preHandler
+// - CORS configure pour credentials: true (cookies)
+//
 // V2.7 :
 // - Quota dynamique : /api/usage detecte automatiquement le mode actif
-//   (free sans credit / free avec 10$ / payant ou mixte) selon le council
-//   actif et le statut OpenRouter /auth/key
-// - Nouveau POST /api/usage/refresh pour invalider le cache OpenRouter
+// - Nouveau POST /api/usage/refresh
 //
 // V2 :
-// - GET /api/models?search=...&pricing=free|paid|all  proxy OpenRouter (cache 1h)
-// - POST .../message[/stream] accepte un champ `override` pour customiser
-//   council_models / chairman_model / eval_criteria a la volee
-// - SSE envoie aussi les timings et duration_ms par modele
+// - GET /api/models?search=...&pricing=free|paid|all
+// - POST .../message[/stream] accepte un champ `override`
+// - SSE envoie les timings et duration_ms par modele
 
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
@@ -43,17 +46,25 @@ import { aggregateUsage } from './pricing.js';
 import { pingModelsParallel, getRecentModelErrors } from './openrouter.js';
 import { exportToMarkdown, exportToJson, exportToDocx, exportToPptx } from './exporters.js';
 import { computeEffectiveQuota, invalidateKeyInfoCache } from './quota.js';
+import { registerAuthPlugin } from './auth.js';
 
 const fastify = Fastify({
   logger: { level: process.env.LOG_LEVEL || 'info' },
   bodyLimit: 1024 * 1024,
 });
 
+// CORS — credentials: true OBLIGATOIRE pour que le browser envoie/recoive les cookies
 await fastify.register(cors, {
   origin: CORS_ORIGINS,
   credentials: true,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
 });
+
+// ---------------------------------------------------------------------------
+// AUTH — enregistrer le plugin AVANT toute autre route /api/*
+// Le preHandler global verifiera les cookies sur toutes les routes protegees.
+// ---------------------------------------------------------------------------
+registerAuthPlugin(fastify);
 
 // ---------------------------------------------------------------------------
 // Cache des modeles OpenRouter (TTL 1h)
@@ -85,7 +96,6 @@ async function fetchOpenRouterModels() {
         prompt: parseFloat(m.pricing?.prompt || '0'),
         completion: parseFloat(m.pricing?.completion || '0'),
       },
-      // is_free : si les 2 prix sont a 0 OU si l'id finit par :free
       is_free:
         m.id.endsWith(':free') ||
         (parseFloat(m.pricing?.prompt || '0') === 0 &&
@@ -97,7 +107,6 @@ async function fetchOpenRouterModels() {
     return models;
   } catch (err) {
     fastify.log.error({ err }, 'Erreur fetch /models, utilisation cache stale');
-    // Si on a un cache obsolete, on le renvoie quand meme plutot que de rien renvoyer
     return modelsCache.data || [];
   }
 }
@@ -109,7 +118,7 @@ async function fetchOpenRouterModels() {
 fastify.get('/', async () => ({
   status: 'ok',
   service: 'LLM Council API',
-  version: '2.7.0',
+  version: '2.8.0',
 }));
 
 fastify.get('/health', async () => ({ status: 'ok' }));
@@ -126,11 +135,11 @@ fastify.get('/api/config', async () => ({
 }));
 
 // ---------------------------------------------------------------------------
-// Health check de modeles (cache 5 min pour ne pas gaspiller le quota)
+// Health check de modeles (cache 5 min)
 // ---------------------------------------------------------------------------
 
-const healthCache = new Map();   // model_id -> {result, fetchedAt}
-const HEALTH_CACHE_TTL_MS = 5 * 60 * 1000;   // 5 minutes
+const healthCache = new Map();
+const HEALTH_CACHE_TTL_MS = 5 * 60 * 1000;
 
 fastify.post('/api/models/health', async (request) => {
   const { models = [], force_refresh = false } = request.body || {};
@@ -146,7 +155,6 @@ fastify.post('/api/models/health', async (request) => {
   const toPing = [];
   const fromCache = [];
 
-  // Verifier le cache pour chaque modele
   for (const m of models) {
     const cached = healthCache.get(m);
     if (!force_refresh && cached && now - cached.fetchedAt < HEALTH_CACHE_TTL_MS) {
@@ -156,7 +164,6 @@ fastify.post('/api/models/health', async (request) => {
     }
   }
 
-  // Ping en parallele les modeles non en cache
   if (toPing.length > 0) {
     fastify.log.info(`Ping ${toPing.length} modele(s) (${fromCache.length} depuis cache)`);
     const results = await pingModelsParallel(toPing);
@@ -166,7 +173,6 @@ fastify.post('/api/models/health', async (request) => {
     }
   }
 
-  // Renvoyer dans l'ordre demande
   const ordered = models.map((m) => fromCache.find((r) => r.model === m));
 
   return {
@@ -183,7 +189,7 @@ fastify.post('/api/models/health', async (request) => {
 });
 
 // ---------------------------------------------------------------------------
-// Models endpoint (proxy OpenRouter avec recherche / filtre)
+// Models endpoint
 // ---------------------------------------------------------------------------
 
 fastify.get('/api/models', async (request) => {
@@ -194,7 +200,6 @@ fastify.get('/api/models', async (request) => {
   const limitNum = Math.min(parseInt(limit, 10) || 50, 200);
 
   let filtered = models;
-
   if (pricing === 'free') filtered = filtered.filter((m) => m.is_free);
   else if (pricing === 'paid') filtered = filtered.filter((m) => !m.is_free);
 
@@ -204,7 +209,6 @@ fastify.get('/api/models', async (request) => {
     );
   }
 
-  // Tri : free d'abord (utile en POC), puis par nom
   filtered.sort((a, b) => {
     if (a.is_free !== b.is_free) return a.is_free ? -1 : 1;
     return a.name.localeCompare(b.name);
@@ -218,16 +222,8 @@ fastify.get('/api/models', async (request) => {
 });
 
 // ---------------------------------------------------------------------------
-// Usage / Quota — quota dynamique selon council actif + statut OpenRouter
+// Usage / Quota
 // ---------------------------------------------------------------------------
-// Query params optionnels (envoyes par la sidebar pour respecter l'override
-// localStorage de l'utilisateur) :
-//   ?council_models=a,b,c&chairman_model=x&title_model=y
-// Si absent, on tombe sur les defaults .env.
-//
-// Reponse : champs retro-compatibles `questions_today`, `quota_daily`,
-// `remaining`, `percent_used` toujours presents pour ne pas casser la sidebar
-// + nouvelle struct `quota` avec mode/raison/credit balance.
 
 fastify.get('/api/usage', async (request) => {
   const q = request.query || {};
@@ -239,7 +235,6 @@ fastify.get('/api/usage', async (request) => {
     title_model: q.title_model || TITLE_MODEL,
   };
 
-  // Compter les questions du jour (= messages assistant crees aujourd'hui)
   const conversations = await storage.listConversations();
   const today = new Date().toISOString().slice(0, 10);
   let questionsToday = 0;
@@ -254,10 +249,7 @@ fastify.get('/api/usage', async (request) => {
     }
   }
 
-  // Detection dynamique du quota effectif
   const quota = await computeEffectiveQuota(activeConfig);
-
-  // Calculs derives (peut etre null si mode 'paid_or_mixed' sans barre)
   const limit = quota.questions_per_day;
   const remaining = limit != null ? Math.max(0, limit - questionsToday) : null;
   const percent_used = limit != null && limit > 0
@@ -265,17 +257,14 @@ fastify.get('/api/usage', async (request) => {
     : 0;
 
   return {
-    // Champs retro-compatibles (la sidebar v2.6 les utilise)
     questions_today: questionsToday,
     quota_daily: limit != null ? limit : DAILY_QUOTA_QUESTIONS,
     remaining: remaining != null ? remaining : 9999,
     percent_used,
     estimated_requests: questionsToday * 10,
-
-    // Nouvelle struct quota dynamique (sidebar v2.7 l'utilise)
     quota: {
-      mode: quota.mode,                              // free_no_credit | free_with_credit | paid_or_mixed | unknown
-      limit,                                          // null = pas de barre (mode payant)
+      mode: quota.mode,
+      limit,
       raw_requests_per_day: quota.raw_requests_per_day,
       show_progress_bar: quota.show_progress_bar,
       reason: quota.reason,
@@ -286,8 +275,6 @@ fastify.get('/api/usage', async (request) => {
   };
 });
 
-// Permet a l'UI de forcer un refresh apres avoir depose un credit sur OpenRouter
-// (sinon cache de 1h cote backend).
 fastify.post('/api/usage/refresh', async () => {
   invalidateKeyInfoCache();
   fastify.log.info('Cache OpenRouter /auth/key invalide manuellement');
@@ -324,7 +311,7 @@ fastify.delete('/api/conversations/:id', async (request, reply) => {
 });
 
 // ---------------------------------------------------------------------------
-// Export d'un message assistant en MD / JSON / DOCX / PPTX
+// Export
 // ---------------------------------------------------------------------------
 
 fastify.get('/api/conversations/:id/export', async (request, reply) => {
@@ -337,7 +324,6 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
     return { error: 'Conversation introuvable' };
   }
 
-  // Si pas de message_index, on prend le dernier message assistant
   let assistantIndex = parseInt(message_index, 10);
   if (isNaN(assistantIndex) || assistantIndex < 0 || assistantIndex >= conv.messages.length) {
     assistantIndex = -1;
@@ -355,7 +341,6 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
     return { error: 'Le message demande n\'est pas une reponse assistant' };
   }
 
-  // Nom de fichier base sur le titre de la conv (sanitize basique)
   const safeTitle = (conv.title || 'council')
     .replace(/[^\w\s-]/g, '')
     .trim()
@@ -371,21 +356,18 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
       reply.header('Content-Disposition', `attachment; filename="${baseName}.json"`);
       return content;
     }
-
     if (format === 'md' || format === 'markdown') {
       const content = exportToMarkdown(conv, assistantIndex);
       reply.header('Content-Type', 'text/markdown; charset=utf-8');
       reply.header('Content-Disposition', `attachment; filename="${baseName}.md"`);
       return content;
     }
-
     if (format === 'docx') {
       const buffer = await exportToDocx(conv, assistantIndex);
       reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
       reply.header('Content-Disposition', `attachment; filename="${baseName}.docx"`);
       return reply.send(buffer);
     }
-
     if (format === 'pptx') {
       const buffer = await exportToPptx(conv, assistantIndex);
       reply.header('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
@@ -403,12 +385,11 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
 });
 
 // ---------------------------------------------------------------------------
-// Helper : extraire l'override de config depuis le body
+// Helper override
 // ---------------------------------------------------------------------------
 
 function extractOverride(body) {
   const override = body?.override || {};
-  // Validation simple : seuls les champs supportes sont retenus
   const result = {};
   if (Array.isArray(override.council_models) && override.council_models.length >= 2) {
     result.council_models = override.council_models.filter((m) => typeof m === 'string' && m.trim());
@@ -477,7 +458,7 @@ fastify.post('/api/conversations/:id/message', async (request, reply) => {
 });
 
 // ---------------------------------------------------------------------------
-// Pipeline council (streaming SSE) — avec override + timings dans les events
+// Pipeline council (streaming SSE)
 // ---------------------------------------------------------------------------
 
 fastify.post('/api/conversations/:id/message/stream', async (request, reply) => {
@@ -529,7 +510,6 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
     });
 
     if (stage1.results.length === 0) {
-      // Analyse des erreurs recentes pour formuler un message clair
       const recentErrors = getRecentModelErrors(pipelineStart);
       const quotaErrors = recentErrors.filter((e) => e.code === 'quota_free_daily');
       const noEndpointsErrors = recentErrors.filter((e) => e.code === 'no_endpoints');
@@ -562,7 +542,7 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
         type: 'error',
         message: errorMessage,
         error_code: errorCode,
-        recent_errors: recentErrors.slice(-10),   // 10 derniers pour debug
+        recent_errors: recentErrors.slice(-10),
       });
       reply.raw.end();
       return;
@@ -599,14 +579,12 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
       duration_ms: stage3.result.duration_ms || 0,
     });
 
-    // Titre
     if (titlePromise) {
       const title = await titlePromise;
       await storage.updateConversationTitle(id, title);
       sse({ type: 'title_complete', data: { title } });
     }
 
-    // Pricing + timings global
     const allUsages = [...stage1.usages, ...stage2.usages];
     if (stage3.usage) allUsages.push(stage3.usage);
     const pricing = {
@@ -653,7 +631,7 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
 
 try {
   await fastify.listen({ host: HOST, port: PORT });
-  fastify.log.info(`LLM Council API listening on http://${HOST}:${PORT}`);
+  fastify.log.info(`LLM Council API v2.8 listening on http://${HOST}:${PORT}`);
 } catch (err) {
   fastify.log.error(err);
   process.exit(1);
