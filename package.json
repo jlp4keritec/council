@@ -1,6 +1,6 @@
 {
   "name": "llm-council",
-  "version": "2.9.0",
+  "version": "2.9.1",
   "description": "LLM Council Node.js — orchestration multi-modèles via OpenRouter, avec auth mono-user",
   "type": "module",
   "main": "backend/server.js",

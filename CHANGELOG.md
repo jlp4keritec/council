@@ -18,6 +18,13 @@ et ce projet adhère au [versionnage sémantique](https://semver.org/lang/fr/).
 
 ---
 
+## [2.9.1] - 2026-05-27
+
+### Fixed
+- Suppression de conversation : le `DELETE /api/conversations/:id` n'envoie plus d'en-tête `Content-Type: application/json` quand la requête n'a pas de corps. Corrige le 400 `FST_ERR_CTP_EMPTY_JSON_BODY` (« Body cannot be empty when content-type is set to 'application/json' ») qui empêchait la suppression. Le helper `jsonRequest` (`frontend/src/api.js`) n'ajoute désormais ce header que lorsqu'un corps est présent.
+
+---
+
 ## [2.9.0] - 2026-05-27
 
 ### Added
@@ -51,8 +58,9 @@ et ce projet adhère au [versionnage sémantique](https://semver.org/lang/fr/).
 
 ---
 
-<!-- Liens de comparaison (ajuste <org>/<repo> à ton dépôt GitHub) -->
-[Unreleased]: https://github.com/<org>/llm-council/compare/v2.9.0...HEAD
+<!-- Liens de comparaison (ajuste <org>/<repo> a ton depot GitHub) -->
+[Unreleased]: https://github.com/<org>/llm-council/compare/v2.9.1...HEAD
+[2.9.1]: https://github.com/<org>/llm-council/compare/v2.9.0...v2.9.1
 [2.9.0]: https://github.com/<org>/llm-council/compare/v2.8.0...v2.9.0
 [2.8.0]: https://github.com/<org>/llm-council/compare/v2.7.1...v2.8.0
 [2.7.1]: https://github.com/<org>/llm-council/releases/tag/v2.7.1

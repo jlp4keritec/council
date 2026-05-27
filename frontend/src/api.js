@@ -11,10 +11,18 @@ const API_BASE = '/api';
 const AUTH_PATHS = ['/auth/login', '/auth/me', '/auth/logout'];
 
 async function jsonRequest(path, options = {}) {
+  // N'ajouter Content-Type: application/json QUE s'il y a un corps.
+  // Sinon Fastify rejette une requete "vide" (ex: DELETE) en 400
+  // FST_ERR_CTP_EMPTY_JSON_BODY ("Body cannot be empty...").
+  const headers = { ...(options.headers || {}) };
+  if (options.body != null && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     credentials: 'include',     // ENVOYER les cookies
     ...options,
+    headers,
   });
 
   // Auto-redirect sur 401 (sauf si on est sur un endpoint auth)

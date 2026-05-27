@@ -1,6 +1,10 @@
-# LLM Council v2 — Node.js
+# LLM Council — Node.js
+
+> **État courant : v2.9.1** — voir [`CHANGELOG.md`](./CHANGELOG.md) pour l'historique détaillé.
 
 Inspiré du [LLM Council de Karpathy](https://github.com/karpathy/llm-council), porté en **Node.js + Fastify** pour s'aligner sur l'écosystème VPS existant (legifrance-mcp, fedlex-mcp, eurlex-mcp, uslaw-mcp, dila-mcp, loi-app, tous en Node).
+
+Le principe : plusieurs LLM donnent un avis (Stage 1), s'évaluent mutuellement en aveugle (Stage 2), puis un Chairman externe synthétise (Stage 3). Outil mono-utilisateur, conçu pour la délibération assistée (usage juridique / AIComply notamment).
 
 ## Différences vs version originale Karpathy
 
@@ -20,16 +24,17 @@ Inspiré du [LLM Council de Karpathy](https://github.com/karpathy/llm-council), 
 ## Stack
 
 - **Backend** : [Fastify 5](https://fastify.dev) + fetch natif (Node 20+) + AbortController + dotenv
-- **Frontend** : React 19 + Vite + react-markdown + remark-gfm
+- **Frontend** : React 19 + Vite 7 + react-markdown + remark-gfm
+- **Auth** : mono-utilisateur (login `admin` / `OPENROUTER_API_KEY`, cookie signé HMAC)
 - **Storage** : JSON par conversation dans `data/conversations/`
 - **Pas de venv, pas de pip** : seulement `npm install` partout
+- **Polices UI** : Bricolage Grotesque (titres), Hanken Grotesk (texte), Geist Mono (métriques)
 
 ## Installation locale
 
 Prérequis : Node.js ≥ 20, une clé OpenRouter.
 
 ```bash
-# Récupère le projet
 cd llm-council
 cp .env.example.free .env       # ou .env.example pour le mode payant
 # Édite .env et renseigne au minimum OPENROUTER_API_KEY
@@ -39,7 +44,8 @@ Puis lance selon ton OS :
 
 **Windows (PowerShell)**
 ```powershell
-.\start.ps1
+.\start.ps1            # vérifie/installe les deps puis lance backend + frontend
+.\start.ps1 -SkipInstall   # saute npm install si déjà fait
 ```
 
 **macOS / Linux**
@@ -48,44 +54,58 @@ chmod +x start.sh
 ./start.sh
 ```
 
-Le script installe les deps si nécessaire et lance backend + frontend.
-
 - Backend : http://localhost:8001
-- Frontend : http://localhost:5180
+- Frontend : http://localhost:5180  ← ouvrir dans le navigateur
+- Connexion : `admin` / valeur de `OPENROUTER_API_KEY`
+
+En dev, pas de build nécessaire (Vite recharge à chaud). `npm run build` ne sert que pour le déploiement.
+
+## Interface (v2.9)
+
+- **Thème pastel** bleu / blanc / rouge, appliqué via les variables CSS `:root` (la sidebar, les modales et le login se retintent automatiquement).
+- **Deux dispositions** commutables par un toggle en haut à droite, **persistées** (clé localStorage `council-view`) :
+  - **Tableau** — 3 panneaux côte à côte par réponse : Conseil (Stage 1) / Classement (Stage 2) / Synthèse (Stage 3) ;
+  - **Lecture** — panneaux empilés dans une colonne centrée.
+  - Sous 1180 px : empilement automatique, toggle masqué.
+- **Stage 2 en liste rangée** construite sur le rang moyen réel (`aggregate_rankings`, plus bas = meilleur) ; le détail par évaluateur (forces / faiblesses anonymisées) reste accessible dans un repli.
+- **3 conseils prédéfinis** dans le modal Configuration (Diversité max / Raisonnement / Conseil actuel — familles d'entraînement décorrélées) + bouton « Défaut (.env serveur) ». Un preset crée un *override navigateur* ; le défaut permanent reste le `.env`.
+- **Version** affichée en bas de la sidebar → clic = modale **« À propos »** qui lit le `CHANGELOG.md`.
 
 ## Configuration
 
-Tout est dans `.env`. Variables clés :
+Tout est dans `.env` (lu **au démarrage** du backend — redémarrer après modification). Variables clés :
 
-- `OPENROUTER_API_KEY` — requis
-- `COUNCIL_MODELS` — CSV des identifiants OpenRouter
+- `OPENROUTER_API_KEY` — requis (sert aussi de mot de passe admin)
+- `COUNCIL_MODELS` — CSV des identifiants OpenRouter (membres du conseil)
 - `CHAIRMAN_MODEL` — modèle synthétiseur (externe au council recommandé)
+- `TITLE_MODEL` — modèle de génération des titres
+- `CHAIRMAN_ANALYSIS_ENABLED` — `true`/`false` (analyse méta-cognitive du Chairman)
 - `EVAL_CRITERIA` — critères Stage 2 (adaptable au domaine)
 - `MAX_RETRIES`, `REQUEST_TIMEOUT` (ms) — robustesse
 - `CORS_ORIGINS` — origines autorisées (CSV)
 
 Voir `.env.example` pour la liste complète.
 
+> **Override navigateur vs `.env`.** Le modal Configuration enregistre un *override* dans le localStorage du navigateur, qui **prime** sur le `.env`. Le `.env` reste la source de vérité du défaut serveur (utilisé en l'absence d'override, sur tout navigateur). Pour faire d'un preset le défaut permanent, reporter ses valeurs dans le `.env`.
+
+### Conseils prédéfinis (presets du modal)
+
+Trois conseils à familles décorrélées, tous en modèles `:free` (à vérifier/ajuster via la recherche du modal, les slugs `:free` tournent) :
+
+- **Diversité max** : DeepSeek · Qwen · Meta · Z.ai — Chairman OpenAI
+- **Raisonnement** : DeepSeek V4 · Qwen · NVIDIA · Arcee — Chairman Meta
+- **Conseil actuel** : tes 4 membres — Chairman GLM (indépendant)
+
 ### Mode 100% gratuit (rate-limited)
 
-Pour tester le projet sans débourser, un `.env.example.free` est fourni — utilise `openrouter/free` (le router automatique d'OpenRouter qui sélectionne parmi les modèles gratuits en filtrant les capabilities) à la place des modèles payants.
+`.env.example.free` est fourni. Rate limits OpenRouter free tier (≈ 200 req/jour sans crédits, ≈ 1000 après un dépôt de 10 $ qui reste en réserve). Le Council fait ~10 appels par question → **~20 questions/jour** sans dépôt, ~100/jour avec.
 
-```bash
-cp .env.example.free .env
-# Édite OPENROUTER_API_KEY
-./start.sh
-```
-
-Rate limits OpenRouter free tier (mai 2026) : ~200 req/jour sans crédits, ~1000 req/jour après un dépôt de 10$ (qui reste en réserve, ne se consomme pas). Le Council fait 10 appels par question, donc **~20 questions/jour** sans dépôt, ~100/jour avec.
-
-**Trois limites à connaître** avant d'utiliser le mode free :
-1. **Qualité Stage 3 dégradée** — les free models sont bons mais en dessous d'Opus/GPT-5.1/Gemini 3 Pro sur la synthèse raisonnée
-2. **Privacy** — la plupart des providers de modèles `:free` loggent les prompts pour entraîner leurs modèles. Inadapté pour données clients ou conformité réglementaire
-3. **Disponibilité non garantie** — les modèles `:free` peuvent être retirés sans préavis
+**Trois limites du mode free :**
+1. **Qualité Stage 3** un cran sous les modèles top-tier payants sur la synthèse raisonnée.
+2. **Privacy** — la plupart des providers `:free` loggent les prompts. Inadapté aux données clients / conformité.
+3. **Disponibilité non garantie** — les modèles `:free` peuvent être retirés sans préavis.
 
 ### Adaptation pour AIComply (mode juridique)
-
-Dans `.env` :
 
 ```env
 EVAL_CRITERIA=Exactitude des références citées (articles, décisions), pertinence de la qualification juridique, complétude au regard du droit applicable, clarté du raisonnement.
@@ -96,8 +116,6 @@ Pour brancher les MCP juridiques (Légifrance, FedLex, EUR-Lex) en pré-retrieva
 ## Déploiement VPS
 
 Cible : `council.mesoutilsagile.com` sur le VPS `151.80.232.214`, port interne **5706**.
-
-Table à jour des ports occupés :
 
 | Port | Service | Sous-domaine |
 |---|---|---|
@@ -111,46 +129,28 @@ Table à jour des ports occupés :
 
 ### Premier déploiement
 
-DNS à créer **avant** : `council.mesoutilsagile.com` → `151.80.232.214`. Vérifie avec `dig council.mesoutilsagile.com +short`.
-
-Puis depuis Windows :
+DNS à créer **avant** : `council.mesoutilsagile.com` → `151.80.232.214`.
 
 ```powershell
 cd C:\Agile\llm-council
+Unblock-File -Path .\deploy-council.ps1
 .\deploy-council.ps1 -Init
 ```
 
-Le script va :
-
-1. Trouver `deploy-config.json` (priorité à `C:\Agile\deploy-config.json`)
-2. Tester SSH
-3. Builder le frontend (`npm run build` → `frontend/dist/`)
-4. Zipper en excluant `.env`, `node_modules`, `data/`, etc.
-5. Uploader sur le VPS
-6. Vérifier les pré-requis (Node ≥ 20, unzip)
-7. Backup éventuel → rsync → `npm install --omit=dev` → PM2 delete + start
-8. Health check local (HTTP 200 sur `/health`)
-9. Demander la clé OpenRouter et générer le `.env` de prod
-10. Créer le vhost Nginx (avec `proxy_buffering off` sur `/stream` pour le SSE)
-11. Demander un email puis lancer Certbot pour le HTTPS
+Le script : trouve `deploy-config.json` → SSH → build frontend (`npm run build` → `frontend/dist/`) → zip (exclut `.env`, `node_modules`, `data/`…) → upload → backup → rsync → `npm install --omit=dev` → PM2 delete + start → health check → vhost Nginx (`proxy_buffering off` sur le SSE) → Certbot HTTPS.
 
 ### Mise à jour ultérieure
 
 ```powershell
-.\deploy-council.ps1
+Unblock-File -Path .\deploy-council.ps1
+.\deploy-council.ps1          # sans -SkipBuild si le frontend a changé
 ```
 
-Le `.env` et `data/` sont préservés (backup → restore après rsync). PM2 fait `delete + start` pour relire l'env.
-
-### Debug / options
-
-```powershell
-.\deploy-council.ps1 -SkipBuild         # frontend déjà buildé
-.\deploy-council.ps1 -SkipNginx -SkipCertbot   # juste le code
-.\deploy-council.ps1 -LogsAfter         # affiche pm2 logs après deploy
-```
+Le `.env` et `data/` du VPS sont **préservés** (backup → restore après rsync). Donc un changement de `COUNCIL_MODELS`/`CHAIRMAN_MODEL` local **n'est pas propagé** : éditer le `.env` du VPS séparément si besoin, puis `pm2 restart llm-council --update-env`.
 
 ### Vérification post-deploy
+
+`Ctrl+Shift+R` sur la prod (cache), puis : toggle Lecture/Tableau, badge version `v2.9.1` + modale « À propos », presets du modal, une délibération qui s'affiche.
 
 ```bash
 ssh ubuntu@151.80.232.214 'pm2 status'
@@ -158,67 +158,85 @@ ssh ubuntu@151.80.232.214 'pm2 logs llm-council --lines 30 --nostream'
 curl https://council.mesoutilsagile.com/health
 ```
 
+## Versioning
+
+Voir `CHANGELOG.md` (format Keep a Changelog). Convention : à chaque feature, ajouter sa ligne dans la section `## [Unreleased]` **dans le même commit que le code**. À la release : renommer `[Unreleased]` en `[X.Y.Z] - AAAA-MM-JJ`, recréer un `[Unreleased]` vide, bumper les deux `package.json`, tagger `vX.Y.Z`. La modale « À propos » affiche la version (`__APP_VERSION__`, injecté depuis `frontend/package.json`) et rend le CHANGELOG.
+
 ## Architecture
 
 ```
 llm-council/
-├── package.json              # Deps backend (Fastify, @fastify/cors, dotenv)
+├── package.json              # Deps backend (Fastify, @fastify/cors, dotenv, docx, pptxgenjs)
+├── CHANGELOG.md              # Historique des versions (Keep a Changelog)
 ├── ecosystem.config.cjs      # PM2 mode Node standard
 ├── deploy-council.ps1        # Script de déploiement VPS
-├── start.sh                  # Démarrage dev local
-├── .env.example
+├── start.ps1 / start.sh      # Démarrage dev local
+├── .env.example / .env.example.free
+│
+├── roadmap/                  # Idées et pistes d'évolution (1 fiche = 1 .md)
+│   ├── README.md
+│   └── leaderboard-par-theme.md
 │
 ├── backend/
 │   ├── server.js             # Fastify app : routes + SSE streaming
+│   ├── auth.js               # Auth mono-user (cookie signé)
 │   ├── config.js             # Variables d'env, modèles, critères
 │   ├── openrouter.js         # Client fetch + retry + pricing
 │   ├── council.js            # 3 stages + structured output + Borda count
+│   ├── exporters.js          # Export MD / JSON / DOCX / PPTX
 │   ├── pricing.js            # Agrégation des coûts
+│   ├── quota.js              # Quota quotidien + détection mode OpenRouter
 │   ├── prompts.js            # Prompts FR
 │   └── storage.js            # JSON persistence atomique
 │
 └── frontend/
-    ├── package.json
-    ├── vite.config.js
-    ├── index.html
+    ├── package.json          # version = source de __APP_VERSION__
+    ├── vite.config.js        # injecte __APP_VERSION__ + proxy /api + fs.allow ('..')
+    ├── index.html            # + polices Google
+    ├── public/landing.html
     └── src/
-        ├── App.jsx
-        ├── api.js
+        ├── App.jsx           # racine : auth + modales (Config, QuotaHelp, About)
+        ├── api.js            # client API (Content-Type JSON seulement si corps)
         ├── main.jsx
-        ├── index.css
+        ├── index.css         # thème pastel + 2 dispositions
         └── components/
-            ├── Sidebar.jsx
-            ├── ChatInterface.jsx
-            ├── Stage1.jsx
-            ├── Stage2.jsx
-            └── Stage3.jsx
+            ├── Login.jsx / Login.css
+            ├── Sidebar.jsx         # + badge version cliquable
+            ├── ChatInterface.jsx   # toggle vue + board par réponse + metrics
+            ├── Stage1.jsx          # panneau Conseil
+            ├── Stage2.jsx          # panneau Classement (liste rangée)
+            ├── Stage3.jsx          # panneau Synthèse (+ Analyse Chairman)
+            ├── ModelSelector.jsx   # config + 3 presets
+            ├── QuotaHelp.jsx
+            └── About.jsx           # modale À propos (lit CHANGELOG.md)
 ```
 
 ## Endpoints API
 
-- `GET /` — health
-- `GET /health` — health (Nginx upstream)
+- `GET /` · `GET /health` — health (Nginx upstream)
 - `GET /api/config` — config publique (modèles, critères)
+- `GET /api/usage` — quota / statut OpenRouter
+- `GET /api/models` · `POST /api/models/health` — recherche / health-check modèles
 - `GET /api/conversations` — liste meta
 - `POST /api/conversations` — crée
 - `GET /api/conversations/:id` — détail
 - `DELETE /api/conversations/:id` — supprime
+- `GET /api/conversations/:id/export` — export (MD/JSON/DOCX/PPTX)
 - `POST /api/conversations/:id/message` — pipeline complet (blocking)
 - `POST /api/conversations/:id/message/stream` — pipeline en SSE (recommandé)
+- `POST /api/auth/login` · `GET /api/auth/me` · `POST /api/auth/logout`
 
-## Coût estimé par requête
+## Roadmap
 
-4 modèles × (Stage 1 + Stage 2) + 1 chairman + 1 titre ≈ **10 appels par question**.
-
-Selon la longueur et le mix de modèles : **environ 0,15 € à 0,40 € par question** pour des réponses moyennes. Le coût exact est affiché dans l'UI à la fin de chaque pipeline (`usage.cost` renvoyé par OpenRouter).
+Voir le dossier [`roadmap/`](./roadmap/). En tête de liste : un **leaderboard par thème data-driven** — persister les classements Stage 2 étiquetés par thème pour, à terme, composer dynamiquement le conseil sur des données réelles (cf. [`roadmap/leaderboard-par-theme.md`](./roadmap/leaderboard-par-theme.md)). À démarrer une fois assez de délibérations accumulées.
 
 ## Limitations connues
 
-1. **Anonymisation imparfaite** : si un modèle se signe au milieu d'une réponse (pas seulement au début), le strip ne le détecte pas.
-2. **Structured output best-effort** : OpenRouter supporte `json_object` sur la plupart des modèles modernes, mais pas tous. Le fallback regex prend le relais sans casser le pipeline.
-3. **Borda count basique** : moyenne des positions sans pondération. OK en POC, perfectible (Condorcet, Schulze) si volume.
-4. **Pas de streaming token-par-token** : le streaming est par stage. Pour du token-by-token, il faudrait passer `stream: true` aux appels OpenRouter et multiplexer.
-5. **MCP juridiques non branchés** : version généraliste. Pour AIComply, fork à prévoir.
+1. **Anonymisation imparfaite** : signature en milieu de réponse non détectée par le strip.
+2. **Structured output best-effort** : fallback regex si un modèle ne respecte pas `json_object`.
+3. **Borda count basique** : moyenne des positions sans pondération (perfectible : Condorcet, Schulze).
+4. **Pas de streaming token-par-token** : le streaming est par stage.
+5. **MCP juridiques non branchés** : version généraliste (fork à prévoir pour AIComply).
 
 ## Licence
 
