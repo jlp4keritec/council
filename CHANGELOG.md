@@ -18,6 +18,15 @@ et ce projet adhère au [versionnage sémantique](https://semver.org/lang/fr/).
 
 ---
 
+## [2.16.2] - 2026-05-28
+
+### Fixed
+- **Crash au démarrage du backend en production** suite à un module manquant. Le fichier `backend/retrieval.js` (grounding juridique, désactivé par défaut via `GROUNDING_ENABLED=false`) importe `@modelcontextprotocol/sdk` en haut de fichier. Node charge cet import **dès le require du module**, même si la fonction n'est jamais appelée, ce qui faisait planter PM2 sur le VPS où le package n'était pas installé (absent du `package.json`).
+- **Correctif** : ajout de `@modelcontextprotocol/sdk: ^1.0.0` dans les `dependencies` de `package.json`. `npm install --omit=dev` côté VPS installe maintenant le module ; `retrieval.js` se charge sans erreur, et reste inactif tant que `GROUNDING_ENABLED=true` n'est pas mis dans le `.env` (fail-open garanti).
+- Aucun changement de code applicatif. Bump 2.16.1 -> 2.16.2 (patch).
+
+---
+
 ## [2.16.1] - 2026-05-28
 
 ### Changed
