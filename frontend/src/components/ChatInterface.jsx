@@ -62,7 +62,7 @@ function PaneSkeleton({ n, title, tinted, loading }) {
   );
 }
 
-export default function ChatInterface({ conversationId, onMessageSent, override }) {
+export default function ChatInterface({ conversationId, onMessageSent, override, hasKey, onOpenAccount }) {
   const [conversation, setConversation] = useState(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -162,7 +162,15 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
       onMessageSent?.();
     } catch (e) {
       console.error(e);
-      setError(e.message || 'Erreur réseau');
+      // 403 no_api_key : l'utilisateur n'a pas encore mis sa cle OpenRouter
+      const msg = String(e?.message || '');
+      if (msg.includes('API 403') || /no_api_key/i.test(msg)) {
+        setError('🔑 Pour utiliser le Council, ajoute ta clé OpenRouter dans « Mon compte » (en bas à gauche).');
+      } else {
+        setError(msg || 'Erreur réseau');
+      }
+      // Nettoie le message "en cours" qui n'a rien produit
+      setStreamingMessage(null);
     } finally {
       setStreaming(false);
     }
@@ -224,6 +232,28 @@ export default function ChatInterface({ conversationId, onMessageSent, override 
         ))}
         <div ref={messagesEndRef} />
       </div>
+
+      {hasKey === false && (
+        <div
+          style={{
+            margin: '12px 24px 0', padding: '10px 14px', borderRadius: 8,
+            background: '#fff5e6', border: '1px solid #f3e0c2', color: '#a06010',
+            fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12,
+          }}
+        >
+          <span>🔑 Pour utiliser le Council, ajoute ta clé OpenRouter dans <strong>Mon compte</strong>.</span>
+          <button
+            onClick={() => onOpenAccount?.()}
+            style={{
+              padding: '6px 12px', fontSize: 12, fontWeight: 600,
+              background: '#a06010', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Aller à Mon compte
+          </button>
+        </div>
+      )}
 
       {error && <div className="error-banner" style={{ margin: '0 24px' }}>{error}</div>}
 
@@ -315,6 +345,7 @@ function AssistantMessage({ msg, conversationId, messageIndex }) {
 
 function ExportMenu({ conversationId, messageIndex }) {
   const [copyStatus, setCopyStatus] = useState(null);
+  const [cortexStatus, setCortexStatus] = useState(null);
 
   async function handleCopyMarkdown() {
     setCopyStatus('copying');
@@ -337,6 +368,19 @@ function ExportMenu({ conversationId, messageIndex }) {
     window.location.href = api.exportUrl(conversationId, format, messageIndex);
   }
 
+  async function handleSendToCortex() {
+    setCortexStatus('sending');
+    try {
+      await api.sendToCortex(conversationId, messageIndex);
+      setCortexStatus('sent');
+      setTimeout(() => setCortexStatus(null), 3000);
+    } catch (e) {
+      console.error('Envoi Cortex échoué:', e);
+      setCortexStatus('error');
+      setTimeout(() => setCortexStatus(null), 4000);
+    }
+  }
+
   return (
     <div className="export-menu" title="Exporter cette réponse">
       <button className="export-btn" onClick={handleCopyMarkdown} disabled={copyStatus === 'copying'}
@@ -347,6 +391,17 @@ function ExportMenu({ conversationId, messageIndex }) {
       <button className="export-btn" onClick={() => handleDownload('json')} title="Télécharger les données brutes en JSON">⬇ .json</button>
       <button className="export-btn export-btn-primary" onClick={() => handleDownload('docx')} title="Télécharger en Word (.docx)">⬇ .docx</button>
       <button className="export-btn" onClick={() => handleDownload('pptx')} title="Télécharger en PowerPoint (.pptx)">⬇ .pptx</button>
+      <button
+        className="export-btn"
+        onClick={handleSendToCortex}
+        disabled={cortexStatus === 'sending'}
+        title="Envoyer cette délibération dans Cortex (arrive dans inbox/)"
+      >
+        {cortexStatus === 'sending' ? '… envoi'
+          : cortexStatus === 'sent' ? '✓ dans Cortex'
+          : cortexStatus === 'error' ? '✗ échec'
+          : '🧠 → Cortex'}
+      </button>
     </div>
   );
 }

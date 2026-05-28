@@ -1,6 +1,6 @@
 # Leaderboard par thème (data-driven)
 
-**Statut :** 💡 idée validée — à démarrer une fois assez de délibérations accumulées
+**Statut :** 🚧 étapes 1-2 livrées en v2.10.0 (tagging thème + persistance) — étapes 3-4 (vue + routeur) à venir
 **Date de capture :** 2026-05-27
 
 ## Idée en une phrase
@@ -73,10 +73,10 @@ Le routeur compose le conseil en s'appuyant sur ce classement empirique, **sous 
 
 ## Étapes de mise en œuvre (ordre suggéré)
 
-1. **Tagging thème** (TITLE_MODEL renvoie aussi un thème) + persistance du tag dans la conversation.
-2. **Agrégation** `(thème, modèle)` dans `data/leaderboard.json` à chaque fin de pipeline.
-3. **Vue lecture seule** « Leaderboard par thème ».
-4. **Routeur** (optionnel, dernière étape) sous les contraintes ci-dessus.
+1. ✅ **(v2.10) Tagging thème** (TITLE_MODEL renvoie aussi un thème) + persistance du tag dans la conversation.
+2. ✅ **(v2.10) Agrégation** `(thème, modèle)` dans `data/leaderboard.json` à chaque fin de pipeline + route `GET /api/leaderboard`.
+3. ⬜ **Vue lecture seule** « Leaderboard par thème » dans l'UI (consomme `GET /api/leaderboard`).
+4. ⬜ **Routeur** (optionnel, dernière étape) sous les contraintes ci-dessus.
 
-> Aucune dépendance bloquante : les étapes 1–3 apportent déjà de la valeur sans toucher au
-> pipeline de délibération. Le routeur (4) ne se branche qu'une fois les données mûres.
+> Étapes 1-2 livrées : les données s'accumulent désormais à chaque délibération.
+> L'étape 3 (UI) peut se faire dès maintenant ; le routeur (4) attend des données mûres.

@@ -1,243 +1,234 @@
-// backend/auth.js v2.8.0
+// backend/auth.js v2.12.0 — Authentification MULTI-UTILISATEUR
 //
-// Authentification simple mono-utilisateur pour le LLM Council.
+// Évolution depuis la v2.8 (mono-user) :
+//   - Inscription libre : email + mot de passe (POST /api/auth/signup)
+//   - Connexion par email + mot de passe (POST /api/auth/login)
+//   - Sessions par utilisateur : le cookie contient l'ID utilisateur (uid)
+//   - Mots de passe hachés (scrypt) via backend/users.js
 //
-// Principe :
-//   - Username = ADMIN_USERNAME (.env, defaut "admin")
-//   - Password = OPENROUTER_API_KEY (la cle deja en place, double usage)
-//   - Cookie httpOnly signe HMAC-SHA256, secret derive de OPENROUTER_API_KEY
-//   - Duree de session = SESSION_DURATION_DAYS (.env, defaut 30 jours)
+// Cookie : httpOnly, signé HMAC-SHA256 avec un secret SERVEUR (SESSION_SECRET,
+// ou dérivé de OPENROUTER_API_KEY par défaut — stable, partagé par tous).
 //
-// Routes exposees (publiques, hors auth) :
-//   POST /api/auth/login   { username, password } -> set-cookie + 200
-//   POST /api/auth/logout                          -> clear cookie + 200
-//   GET  /api/auth/me                              -> { authenticated, username } | 401
+// Routes publiques (hors auth) :
+//   POST /api/auth/signup  { email, password } -> set-cookie + user
+//   POST /api/auth/login   { email, password } -> set-cookie + user
+//   POST /api/auth/logout                        -> clear cookie
+//   GET  /api/auth/me                            -> { authenticated, ... } | 401
 //
-// Toutes les autres routes /api/* sont protegees par un preHandler :
-//   - Cookie absent ou invalide -> 401
-//   - Cookie expire -> 401 (le frontend redirige vers Login)
-//
-// Note : pas de bcrypt (un seul user, password = API key = string aleatoire
-// de 100+ chars). Comparaison constante via crypto.timingSafeEqual.
+// Les autres routes /api/* exigent une session valide ; request.user = { id, email, is_admin }.
 
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { OPENROUTER_API_KEY, ADMIN_USERNAME, SESSION_DURATION_DAYS } from './config.js';
+import {
+  SESSION_SECRET, SESSION_DURATION_DAYS, PASSWORD_MIN_LENGTH,
+} from './config.js';
+import * as users from './users.js';
 
 const COOKIE_NAME = 'llm_council_session';
 const SESSION_MS = SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000;
 
-// Secret HMAC derive de la cle OpenRouter (deja secrete, deja en place).
-// Si la cle change, toutes les sessions sont invalidees -> comportement attendu.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function getSecret() {
-  if (!OPENROUTER_API_KEY) {
-    throw new Error('[auth] OPENROUTER_API_KEY manquante : impossible de signer les sessions');
+  if (!SESSION_SECRET) {
+    throw new Error('[auth] SESSION_SECRET indisponible : impossible de signer les sessions');
   }
-  return createHmac('sha256', 'llm-council-auth-v1').update(OPENROUTER_API_KEY).digest();
+  return createHmac('sha256', 'llm-council-auth-v2').update(SESSION_SECRET).digest();
 }
 
 // -----------------------------------------------------------------------------
-// Encodage / decodage des cookies signes
+// Cookies signés : base64url(payload).base64url(hmac)
 // -----------------------------------------------------------------------------
-// Format : base64url(payload).base64url(signature_hmac)
 
 function b64urlEncode(buf) {
   return Buffer.from(buf).toString('base64')
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
-
 function b64urlDecode(str) {
   const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
-  return Buffer.from(
-    str.replace(/-/g, '+').replace(/_/g, '/') + pad,
-    'base64',
-  );
+  return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
 }
-
 function sign(payloadStr) {
-  const secret = getSecret();
-  const sig = createHmac('sha256', secret).update(payloadStr).digest();
-  return b64urlEncode(sig);
+  return b64urlEncode(createHmac('sha256', getSecret()).update(payloadStr).digest());
 }
 
-function createSessionToken(username) {
+function createSessionToken(user) {
   const payload = {
-    u: username,
+    uid: user.id,
+    email: user.email,
     iat: Math.floor(Date.now() / 1000),
     exp: Math.floor((Date.now() + SESSION_MS) / 1000),
     nonce: b64urlEncode(randomBytes(8)),
   };
   const payloadStr = JSON.stringify(payload);
-  const payloadB64 = b64urlEncode(payloadStr);
-  const signature = sign(payloadStr);
-  return `${payloadB64}.${signature}`;
+  return `${b64urlEncode(payloadStr)}.${sign(payloadStr)}`;
 }
 
 function verifySessionToken(token) {
   if (!token || typeof token !== 'string') return null;
   const parts = token.split('.');
   if (parts.length !== 2) return null;
-
-  const [payloadB64, signatureGiven] = parts;
+  const [payloadB64, sigGiven] = parts;
   let payloadStr;
-  try {
-    payloadStr = b64urlDecode(payloadB64).toString('utf-8');
-  } catch {
-    return null;
-  }
+  try { payloadStr = b64urlDecode(payloadB64).toString('utf-8'); } catch { return null; }
 
-  // Verifier la signature en temps constant
   const expectedSig = sign(payloadStr);
   const a = Buffer.from(expectedSig);
-  const b = Buffer.from(signatureGiven);
+  const b = Buffer.from(sigGiven);
   if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
 
-  // Verifier l'expiration
   let payload;
-  try {
-    payload = JSON.parse(payloadStr);
-  } catch {
-    return null;
-  }
+  try { payload = JSON.parse(payloadStr); } catch { return null; }
   if (typeof payload.exp !== 'number' || payload.exp * 1000 < Date.now()) return null;
-
   return payload;
 }
 
 // -----------------------------------------------------------------------------
-// Comparaison password en temps constant
+// Set-Cookie helpers
 // -----------------------------------------------------------------------------
 
-function constantTimeEqual(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const bufA = Buffer.from(a, 'utf-8');
-  const bufB = Buffer.from(b, 'utf-8');
-  // Toujours faire le timingSafeEqual sur des buffers de meme longueur
-  // (sinon il throw). On compare la longueur a la fin pour ne pas leaker
-  // la longueur reelle du password via early return.
-  const maxLen = Math.max(bufA.length, bufB.length, 1);
-  const padA = Buffer.alloc(maxLen);
-  const padB = Buffer.alloc(maxLen);
-  bufA.copy(padA);
-  bufB.copy(padB);
-  const equal = timingSafeEqual(padA, padB);
-  return equal && bufA.length === bufB.length;
+function isProd() {
+  return process.env.NODE_ENV === 'production' || process.env.LLM_COUNCIL_FORCE_SECURE === 'true';
 }
-
-// -----------------------------------------------------------------------------
-// Construction du Set-Cookie header
-// -----------------------------------------------------------------------------
-
 function buildCookieValue(token) {
-  // En prod (HTTPS) : Secure obligatoire. En dev : on l'enleve sinon le browser refuse le cookie.
-  const isProd = process.env.NODE_ENV === 'production' ||
-                 process.env.LLM_COUNCIL_FORCE_SECURE === 'true';
   const parts = [
-    `${COOKIE_NAME}=${token}`,
-    `Max-Age=${Math.floor(SESSION_MS / 1000)}`,
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
+    `${COOKIE_NAME}=${token}`, `Max-Age=${Math.floor(SESSION_MS / 1000)}`,
+    'Path=/', 'HttpOnly', 'SameSite=Lax',
   ];
-  if (isProd) parts.push('Secure');
+  if (isProd()) parts.push('Secure');
   return parts.join('; ');
 }
-
 function buildClearCookieValue() {
-  const isProd = process.env.NODE_ENV === 'production' ||
-                 process.env.LLM_COUNCIL_FORCE_SECURE === 'true';
-  const parts = [
-    `${COOKIE_NAME}=`,
-    'Max-Age=0',
-    'Path=/',
-    'HttpOnly',
-    'SameSite=Lax',
-  ];
-  if (isProd) parts.push('Secure');
+  const parts = [`${COOKIE_NAME}=`, 'Max-Age=0', 'Path=/', 'HttpOnly', 'SameSite=Lax'];
+  if (isProd()) parts.push('Secure');
   return parts.join('; ');
 }
-
-// -----------------------------------------------------------------------------
-// Parser un cookie depuis l'en-tete Cookie
-// -----------------------------------------------------------------------------
 
 function parseCookie(cookieHeader, name) {
   if (!cookieHeader) return null;
-  const items = cookieHeader.split(';').map((s) => s.trim());
-  for (const item of items) {
-    const eqIdx = item.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = item.slice(0, eqIdx);
-    if (key === name) return item.slice(eqIdx + 1);
+  for (const item of cookieHeader.split(';').map((s) => s.trim())) {
+    const eq = item.indexOf('=');
+    if (eq === -1) continue;
+    if (item.slice(0, eq) === name) return item.slice(eq + 1);
   }
   return null;
 }
 
 // -----------------------------------------------------------------------------
-// Plugin Fastify : routes /api/auth/* + preHandler pour /api/*
+// Petit garde anti-bruteforce en mémoire (par IP). Se réinitialise au redémarrage.
+// -----------------------------------------------------------------------------
+
+const attempts = new Map(); // ip -> { count, first }
+const WINDOW_MS = 10 * 60 * 1000; // 10 min
+const MAX_ATTEMPTS = 20;
+
+function tooManyAttempts(ip) {
+  const now = Date.now();
+  const rec = attempts.get(ip);
+  if (!rec || now - rec.first > WINDOW_MS) {
+    attempts.set(ip, { count: 1, first: now });
+    return false;
+  }
+  rec.count += 1;
+  return rec.count > MAX_ATTEMPTS;
+}
+
+// -----------------------------------------------------------------------------
+// Plugin Fastify
 // -----------------------------------------------------------------------------
 
 export function registerAuthPlugin(fastify) {
-  // Routes publiques (hors auth)
   const PUBLIC_PATHS = new Set([
+    '/api/auth/signup',
     '/api/auth/login',
-    '/api/auth/me',     // public pour que le frontend puisse checker sans 401 dans la console
+    '/api/auth/me',
     '/health',
     '/',
   ]);
 
-  // PreHandler global : exige une session valide pour /api/*
   fastify.addHook('preHandler', async (request, reply) => {
     const url = request.raw.url || '';
-
-    // /api/auth/logout passe par auth aussi : pas de panique si session invalide,
-    // on accepte de "logger out" un user deja deconnecte
     if (url.startsWith('/api/auth/logout')) return;
-
-    // Routes publiques explicites
     if (PUBLIC_PATHS.has(url.split('?')[0])) return;
-
-    // Pas /api/* -> on laisse passer (ex: /health, healthcheck, etc.)
     if (!url.startsWith('/api/')) return;
 
-    // Verifier le cookie
     const cookie = parseCookie(request.headers.cookie, COOKIE_NAME);
     const payload = verifySessionToken(cookie);
     if (!payload) {
       reply.code(401);
-      return reply.send({ error: 'unauthorized', message: 'Session invalide ou expiree' });
+      return reply.send({ error: 'unauthorized', message: 'Session invalide ou expirée' });
     }
+    // Recharger l'utilisateur (pour récupérer is_admin / has_key à jour)
+    const u = await users.findById(payload.uid);
+    if (!u) {
+      reply.code(401);
+      return reply.send({ error: 'unauthorized', message: 'Compte introuvable' });
+    }
+    if (u.is_disabled) {
+      reply.code(403);
+      reply.header('Set-Cookie', buildClearCookieValue());
+      return reply.send({ error: 'account_disabled', message: 'Ce compte a été désactivé par l\'administrateur.' });
+    }
+    request.user = { id: u.id, email: u.email, is_admin: !!u.is_admin, has_key: !!u.openrouter_key_enc };
+  });
 
-    // Stocker l'identite dans la request pour les handlers ulterieurs
-    request.user = { username: payload.u };
+  // -------------------- POST /api/auth/signup --------------------
+  fastify.post('/api/auth/signup', async (request, reply) => {
+    const ip = request.ip || 'unknown';
+    if (tooManyAttempts(ip)) {
+      reply.code(429);
+      return { error: 'too_many', message: 'Trop de tentatives. Réessaie dans quelques minutes.' };
+    }
+    const { email, password } = request.body || {};
+    if (typeof email !== 'string' || !EMAIL_RE.test(email.trim())) {
+      reply.code(400);
+      return { error: 'bad_email', message: 'Adresse email invalide.' };
+    }
+    if (typeof password !== 'string' || password.length < PASSWORD_MIN_LENGTH) {
+      reply.code(400);
+      return { error: 'weak_password', message: `Mot de passe trop court (au moins ${PASSWORD_MIN_LENGTH} caractères).` };
+    }
+    try {
+      const user = await users.createUser(email, password);
+      const token = createSessionToken(user);
+      reply.header('Set-Cookie', buildCookieValue(token));
+      fastify.log.info(`[auth] inscription : ${user.email}${user.is_admin ? ' (admin)' : ''}`);
+      return { authenticated: true, ...user, expires_in_days: SESSION_DURATION_DAYS };
+    } catch (err) {
+      if (err.code === 'EMAIL_TAKEN') {
+        reply.code(409);
+        return { error: 'email_taken', message: err.message };
+      }
+      throw err;
+    }
   });
 
   // -------------------- POST /api/auth/login --------------------
   fastify.post('/api/auth/login', async (request, reply) => {
-    const { username, password } = request.body || {};
-
-    if (typeof username !== 'string' || typeof password !== 'string') {
+    const ip = request.ip || 'unknown';
+    if (tooManyAttempts(ip)) {
+      reply.code(429);
+      return { error: 'too_many', message: 'Trop de tentatives. Réessaie dans quelques minutes.' };
+    }
+    const { email, password } = request.body || {};
+    if (typeof email !== 'string' || typeof password !== 'string') {
       reply.code(400);
-      return { error: 'bad_request', message: 'username et password requis' };
+      return { error: 'bad_request', message: 'email et mot de passe requis' };
     }
-
-    // Comparaison en temps constant (les 2 doivent matcher)
-    const usernameOk = constantTimeEqual(username.trim(), ADMIN_USERNAME);
-    const passwordOk = constantTimeEqual(password, OPENROUTER_API_KEY);
-
-    if (!usernameOk || !passwordOk) {
-      // Pause anti-bruteforce simple (300ms)
-      await new Promise((res) => setTimeout(res, 300));
+    const user = await users.authenticate(email, password);
+    if (!user) {
+      await new Promise((res) => setTimeout(res, 300)); // anti-bruteforce
       reply.code(401);
-      return { error: 'invalid_credentials', message: 'Identifiants incorrects' };
+      return { error: 'invalid_credentials', message: 'Email ou mot de passe incorrect.' };
     }
-
-    const token = createSessionToken(ADMIN_USERNAME);
+    // Compte desactive : refuser meme avec le bon mot de passe
+    const full = await users.findById(user.id);
+    if (full && full.is_disabled) {
+      reply.code(403);
+      return { error: 'account_disabled', message: 'Ce compte a été désactivé par l\'administrateur.' };
+    }
+    const token = createSessionToken(user);
     reply.header('Set-Cookie', buildCookieValue(token));
-    return {
-      authenticated: true,
-      username: ADMIN_USERNAME,
-      expires_in_days: SESSION_DURATION_DAYS,
-    };
+    return { authenticated: true, ...user, expires_in_days: SESSION_DURATION_DAYS };
   });
 
   // -------------------- POST /api/auth/logout --------------------
@@ -254,14 +245,190 @@ export function registerAuthPlugin(fastify) {
       reply.code(401);
       return { authenticated: false };
     }
+    const u = await users.findById(payload.uid);
+    if (!u) {
+      reply.code(401);
+      return { authenticated: false };
+    }
     return {
       authenticated: true,
-      username: payload.u,
+      id: u.id,
+      email: u.email,
+      username: u.email, // compat frontend existant (affichage)
+      is_admin: !!u.is_admin,
+      has_key: !!u.openrouter_key_enc,
+      created_at: u.created_at,
       expires_at: new Date(payload.exp * 1000).toISOString(),
     };
   });
 
-  fastify.log.info(
-    `[auth] Plugin enregistre : user="${ADMIN_USERNAME}", session=${SESSION_DURATION_DAYS}j`,
-  );
+  fastify.log.info(`[auth] Multi-user activé · session=${SESSION_DURATION_DAYS}j`);
+
+  // ===========================================================================
+  // Compte utilisateur (v2.14) — modifications, suppression
+  // ===========================================================================
+  // Toutes ces routes exigent une session valide (deja garantie par le preHandler).
+  // Chacune redemande le MOT DE PASSE ACTUEL pour confirmer l'identite.
+
+  // PATCH /api/auth/password { current_password, new_password }
+  fastify.patch('/api/auth/password', async (request, reply) => {
+    const { current_password, new_password } = request.body || {};
+    if (typeof current_password !== 'string' || typeof new_password !== 'string') {
+      reply.code(400);
+      return { error: 'bad_request', message: 'Mot de passe actuel et nouveau requis.' };
+    }
+    if (new_password.length < PASSWORD_MIN_LENGTH) {
+      reply.code(400);
+      return { error: 'weak_password', message: `Nouveau mot de passe trop court (au moins ${PASSWORD_MIN_LENGTH} caractères).` };
+    }
+    try {
+      const updated = await users.updatePassword(request.user.id, current_password, new_password);
+      fastify.log.info(`[auth] mot de passe change : ${updated.email}`);
+      return { ok: true };
+    } catch (err) {
+      if (err.code === 'BAD_CURRENT_PASSWORD') {
+        reply.code(401);
+        return { error: 'bad_current', message: err.message };
+      }
+      throw err;
+    }
+  });
+
+  // PATCH /api/auth/email { new_email, current_password }
+  fastify.patch('/api/auth/email', async (request, reply) => {
+    const { new_email, current_password } = request.body || {};
+    if (typeof new_email !== 'string' || !EMAIL_RE.test(new_email.trim())) {
+      reply.code(400);
+      return { error: 'bad_email', message: 'Adresse email invalide.' };
+    }
+    if (typeof current_password !== 'string') {
+      reply.code(400);
+      return { error: 'bad_request', message: 'Mot de passe actuel requis.' };
+    }
+    try {
+      const updated = await users.updateEmail(request.user.id, new_email, current_password);
+      // Re-emettre le cookie avec le nouvel email dans le payload (cosmetique)
+      const token = createSessionToken({ id: updated.id, email: updated.email });
+      reply.header('Set-Cookie', buildCookieValue(token));
+      fastify.log.info(`[auth] email change : ${updated.email}`);
+      return { ok: true, email: updated.email };
+    } catch (err) {
+      if (err.code === 'BAD_CURRENT_PASSWORD') {
+        reply.code(401);
+        return { error: 'bad_current', message: err.message };
+      }
+      if (err.code === 'EMAIL_TAKEN') {
+        reply.code(409);
+        return { error: 'email_taken', message: err.message };
+      }
+      throw err;
+    }
+  });
+
+  // DELETE /api/auth/account { current_password }
+  // Supprime aussi toutes les conversations possedees par l'utilisateur.
+  fastify.delete('/api/auth/account', async (request, reply) => {
+    const { current_password } = request.body || {};
+    if (typeof current_password !== 'string') {
+      reply.code(400);
+      return { error: 'bad_request', message: 'Mot de passe actuel requis.' };
+    }
+    try {
+      // 1) suppression des conversations de l'utilisateur (uniquement les siennes)
+      const storage = await import('./storage.js');
+      const list = await storage.listConversations(request.user);
+      let removed = 0;
+      for (const item of list) {
+        if (item.owner === request.user.id) {
+          if (await storage.deleteConversation(item.id)) removed += 1;
+        }
+      }
+      // 2) suppression du compte (avec verification du mot de passe)
+      await users.deleteUser(request.user.id, current_password);
+      reply.header('Set-Cookie', buildClearCookieValue());
+      fastify.log.info(`[auth] compte supprime + ${removed} conversations`);
+      return { ok: true, deleted_conversations: removed };
+    } catch (err) {
+      if (err.code === 'BAD_CURRENT_PASSWORD') {
+        reply.code(401);
+        return { error: 'bad_current', message: err.message };
+      }
+      throw err;
+    }
+  });
+
+  // ===========================================================================
+  // Cle OpenRouter par utilisateur (v2.15)
+  // ===========================================================================
+
+  // PUT /api/auth/openrouter-key { api_key }
+  fastify.put('/api/auth/openrouter-key', async (request, reply) => {
+    const { api_key } = request.body || {};
+    if (typeof api_key !== 'string' || api_key.trim().length < 10) {
+      reply.code(400);
+      return { error: 'bad_key', message: 'Clé invalide (trop courte). Elle doit commencer par sk-or-…' };
+    }
+    try {
+      await users.setOpenRouterKey(request.user.id, api_key);
+      fastify.log.info(`[auth] cle OpenRouter enregistree pour ${request.user.email}`);
+      return { ok: true, has_key: true };
+    } catch (err) {
+      reply.code(500);
+      return { error: 'internal', message: err.message || 'Erreur lors de l\'enregistrement.' };
+    }
+  });
+
+  // DELETE /api/auth/openrouter-key
+  fastify.delete('/api/auth/openrouter-key', async (request) => {
+    await users.clearOpenRouterKey(request.user.id);
+    return { ok: true, has_key: false };
+  });
+
+  // POST /api/auth/openrouter-key/test  -> verifie via /api/v1/key d'OpenRouter
+  // Body optionnel : { api_key } pour tester une cle AVANT de l'enregistrer.
+  fastify.post('/api/auth/openrouter-key/test', async (request, reply) => {
+    let keyToTest = null;
+    if (request.body && typeof request.body.api_key === 'string' && request.body.api_key.trim().length >= 10) {
+      keyToTest = request.body.api_key.trim();
+    } else {
+      keyToTest = await users.getDecryptedKey(request.user.id);
+    }
+    if (!keyToTest) {
+      reply.code(400);
+      return { ok: false, error: 'no_key', message: 'Aucune clé à tester. Colle ta clé et réessaie.' };
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch('https://openrouter.ai/api/v1/key', {
+        headers: { Authorization: `Bearer ${keyToTest}` },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, error: 'invalid', message: 'OpenRouter refuse cette clé (401/403). Vérifie qu\'elle est bien copiée et active.' };
+      }
+      if (!res.ok) {
+        return { ok: false, error: 'http', message: `OpenRouter a répondu HTTP ${res.status}.` };
+      }
+      const data = await res.json();
+      // OpenRouter renvoie typiquement { data: { label, usage, limit, ... } }
+      const info = (data && data.data) || data || {};
+      return {
+        ok: true,
+        message: 'Clé valide ✓',
+        details: {
+          label: info.label || null,
+          usage: info.usage ?? null,
+          limit: info.limit ?? null,
+          is_free_tier: info.is_free_tier ?? null,
+        },
+      };
+    } catch (err) {
+      reply.code(502);
+      return { ok: false, error: 'network', message: `Impossible de joindre OpenRouter : ${err.message}` };
+    }
+  });
 }

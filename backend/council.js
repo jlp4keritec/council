@@ -13,6 +13,8 @@ import {
   COUNCIL_FALLBACK_POOL as DEFAULT_FALLBACK_POOL,
   CHAIRMAN_ANALYSIS_ENABLED as DEFAULT_ANALYSIS_ENABLED,
   TITLE_TIMEOUT,
+  THEME_VOCAB,
+  THEME_TAGGING_ENABLED,
 } from './config.js';
 import { queryModel, queryModelsParallel } from './openrouter.js';
 import {
@@ -20,8 +22,11 @@ import {
   stage3ChairmanPrompt,
   stage3ChairmanSimplePrompt,
   titlePrompt,
+  titleAndThemePrompt,
+  groundingSystemPrompt,
 } from './prompts.js';
 import { aggregateUsage } from './pricing.js';
+import { fetchGrounding } from './retrieval.js';
 
 // ============================================================================
 // Anonymisation renforcee
@@ -87,11 +92,26 @@ function resolveConfig(override = {}) {
 
 export async function stage1CollectResponses(userQuery, override = {}) {
   const { councilModels, fallbackPool, minResponses } = resolveConfig(override);
-  const messages = [{ role: 'user', content: userQuery }];
   const stageStart = Date.now();
 
+  // --- Grounding juridique (v2.10, fail-open) ---
+  // On tente de recuperer des sources via MCP ; en cas d'echec, grounding = null
+  // et on poursuit normalement. Si on a des sources, on les injecte en message
+  // systeme en tete, vu par TOUS les membres du conseil.
+  let grounding = null;
+  const messages = [];
+  try {
+    grounding = await fetchGrounding(userQuery);
+  } catch {
+    grounding = null;   // ceinture + bretelles (fetchGrounding ne throw deja pas)
+  }
+  if (grounding && grounding.text) {
+    messages.push({ role: 'system', content: groundingSystemPrompt(grounding.text) });
+  }
+  messages.push({ role: 'user', content: userQuery });
+
   // 1. Essai initial du council configure (en parallele)
-  const responses = await queryModelsParallel(councilModels, messages);
+  const responses = await queryModelsParallel(councilModels, messages, { apiKey: override.apiKey });
 
   const results = [];
   const usages = [];
@@ -127,7 +147,7 @@ export async function stage1CollectResponses(userQuery, override = {}) {
       attemptedFallback.push(fallbackModel);
       console.warn(`Stage 1 fallback : essai ${fallbackModel} (${results.length}/${minResponses} reponses actuelles)`);
 
-      const resp = await queryModel(fallbackModel, messages);
+      const resp = await queryModel(fallbackModel, messages, { apiKey: override.apiKey });
 
       if (resp && resp.content) {
         // model effectif renvoye par OpenRouter (utile pour openrouter/free)
@@ -156,6 +176,7 @@ export async function stage1CollectResponses(userQuery, override = {}) {
     reached_minimum: results.length >= minResponses,
     min_responses_target: minResponses,
     stage_duration_ms: Date.now() - stageStart,
+    grounding: grounding ? { used: true, tool: grounding.tool, url: grounding.url, chars: grounding.text.length } : { used: false },
   };
 }
 
@@ -189,7 +210,7 @@ export async function stage2CollectRankings(userQuery, stage1Results, override =
   const messages = [{ role: 'user', content: prompt }];
   const responseFormat = { type: 'json_object' };
 
-  const responses = await queryModelsParallel(respondingModels, messages, { responseFormat });
+  const responses = await queryModelsParallel(respondingModels, messages, { responseFormat, apiKey: override.apiKey });
 
   const rankings = [];
   const usages = [];
@@ -373,8 +394,8 @@ export async function stage3SynthesizeFinal(userQuery, stage1Results, stage2Resu
 
   // JSON object uniquement si analyse activee (sinon markdown classique)
   const queryOptions = analysisEnabled
-    ? { responseFormat: { type: 'json_object' } }
-    : {};
+    ? { responseFormat: { type: 'json_object' }, apiKey: override.apiKey }
+    : { apiKey: override.apiKey };
 
   // 1ere tentative : chairman officiel
   let response = await queryModel(chairmanModel, messages, queryOptions);
@@ -490,22 +511,66 @@ function parseChairmanResponse(text) {
 }
 
 // ============================================================================
-// Titre auto
+// Titre auto (+ theme pour le leaderboard, v2.10)
 // ============================================================================
 
-export async function generateConversationTitle(userQuery, override = {}) {
-  const { titleModel } = resolveConfig(override);
-  const messages = [{ role: 'user', content: titlePrompt(userQuery) }];
-  const response = await queryModel(titleModel, messages, {
-    timeout: TITLE_TIMEOUT,
-    maxRetries: 1,
-  });
+function normalizeTheme(raw) {
+  const vocab = THEME_VOCAB && THEME_VOCAB.length ? THEME_VOCAB : ['divers'];
+  if (!raw || typeof raw !== 'string') return 'divers';
+  const t = raw.trim().toLowerCase();
+  // match exact, sinon match "commence par", sinon divers
+  if (vocab.includes(t)) return t;
+  const starts = vocab.find((v) => t.startsWith(v) || v.startsWith(t));
+  return starts || (vocab.includes('divers') ? 'divers' : vocab[vocab.length - 1]);
+}
 
-  if (!response) return 'Nouvelle conversation';
-
-  let title = (response.content || '').trim().replace(/^["']|["']$/g, '').trim();
+function cleanTitle(raw) {
+  let title = (raw || '').trim().replace(/^["']|["']$/g, '').trim();
   if (!title) return 'Nouvelle conversation';
   return title.length <= 50 ? title : title.slice(0, 47) + '...';
+}
+
+/**
+ * Genere le titre ET le theme de la conversation en UN SEUL appel (replie dans
+ * l'appel de titre existant -> pas de cout supplementaire). Robuste : si le
+ * tagging est desactive ou si le JSON ne parse pas, on retombe proprement sur
+ * un titre texte + theme 'divers'.
+ *
+ * @returns {Promise<{title: string, theme: string}>}
+ */
+export async function generateConversationTitle(userQuery, override = {}) {
+  const { titleModel } = resolveConfig(override);
+
+  // Mode sans tagging : ancien comportement (titre texte simple) + theme divers.
+  if (!THEME_TAGGING_ENABLED) {
+    const response = await queryModel(titleModel, [{ role: 'user', content: titlePrompt(userQuery) }], {
+      timeout: TITLE_TIMEOUT, apiKey: override.apiKey,
+      maxRetries: 1,
+    });
+    return { title: response ? cleanTitle(response.content) : 'Nouvelle conversation', theme: 'divers' };
+  }
+
+  // Mode tagging : titre + theme en JSON.
+  const response = await queryModel(
+    titleModel,
+    [{ role: 'user', content: titleAndThemePrompt(userQuery, THEME_VOCAB) }],
+    { timeout: TITLE_TIMEOUT, apiKey: override.apiKey, maxRetries: 1, responseFormat: { type: 'json_object' } },
+  );
+
+  if (!response || !response.content) {
+    return { title: 'Nouvelle conversation', theme: 'divers' };
+  }
+
+  const parsed = tryParseJson(response.content);
+  if (parsed && (parsed.title || parsed.theme)) {
+    return {
+      title: cleanTitle(parsed.title),
+      theme: normalizeTheme(parsed.theme),
+    };
+  }
+
+  // Fallback : le modele a repondu en texte brut -> on l'utilise comme titre.
+  return { title: cleanTitle(response.content), theme: 'divers' };
 }
 
 // ============================================================================

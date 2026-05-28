@@ -6,7 +6,11 @@ import ChatInterface from './components/ChatInterface.jsx';
 import ModelSelector from './components/ModelSelector.jsx';
 import QuotaHelp from './components/QuotaHelp.jsx';
 import About from './components/About.jsx';
+import SearchPage from './components/SearchPage.jsx';
+import AccountPage from './components/AccountPage.jsx';
+import AdminPage from './components/AdminPage.jsx';
 import Login from './components/Login.jsx';
+import { ConfirmProvider } from './components/ConfirmDialog.jsx';
 
 export default function App() {
   // ============== AUTH STATE ==============
@@ -16,6 +20,7 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [isAuthed, setIsAuthed] = useState(false);
   const [authUser, setAuthUser] = useState(null);
+  const [authMe, setAuthMe] = useState(null); // objet complet (id, email, is_admin, created_at, has_key)
 
   // ============== APP STATE ==============
   const [activeId, setActiveId] = useState(null);
@@ -23,6 +28,9 @@ export default function App() {
   const [showConfig, setShowConfig] = useState(false);
   const [showQuotaHelp, setShowQuotaHelp] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showAccount, setShowAccount] = useState(false);
+  const [showAdmin, setShowAdmin] = useState(false);
   const [override, setOverride] = useState(loadConfigOverride);
   const [serverDefaults, setServerDefaults] = useState(null);
 
@@ -37,6 +45,7 @@ export default function App() {
           const data = await res.json();
           setIsAuthed(!!data.authenticated);
           setAuthUser(data.username || null);
+          setAuthMe(data.authenticated ? data : null);
         } else {
           setIsAuthed(false);
         }
@@ -54,6 +63,7 @@ export default function App() {
     const onAuthRequired = () => {
       setIsAuthed(false);
       setAuthUser(null);
+      setAuthMe(null);
     };
     window.addEventListener('auth-required', onAuthRequired);
     return () => window.removeEventListener('auth-required', onAuthRequired);
@@ -82,6 +92,9 @@ export default function App() {
   const handleNew = useCallback(async () => {
     const conv = await api.createConversation();
     setActiveId(conv.id);
+    setShowSearch(false);
+    setShowAccount(false);
+    setShowAdmin(false);
     setRefreshKey((k) => k + 1);
   }, []);
 
@@ -94,6 +107,13 @@ export default function App() {
     saveConfigOverride(newOverride);
   }, []);
 
+  // Ouvre une conversation depuis la page Recherche (et ferme la recherche)
+  const handleSelectFromSearch = useCallback((id) => {
+    setActiveId(id);
+    setShowSearch(false);
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   const handleLoginSuccess = useCallback(async () => {
     setIsAuthed(true);
     try {
@@ -101,6 +121,7 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setAuthUser(data.username || null);
+        setAuthMe(data.authenticated ? data : null);
       }
     } catch { /* silencieux */ }
   }, []);
@@ -111,6 +132,7 @@ export default function App() {
     } catch { /* silencieux */ }
     setIsAuthed(false);
     setAuthUser(null);
+    setAuthMe(null);
     setActiveId(null);
   }, []);
 
@@ -143,23 +165,55 @@ export default function App() {
 
   // Authentifie -> App normale
   return (
-    <div className="app">
+    <ConfirmProvider>
+      <div className="app">
       <Sidebar
         activeId={activeId}
-        onSelect={setActiveId}
+        onSelect={(id) => { setActiveId(id); setShowSearch(false); setShowAccount(false); setShowAdmin(false); }}
         onNew={handleNew}
         onOpenConfig={() => setShowConfig(true)}
         onOpenQuotaHelp={() => setShowQuotaHelp(true)}
+        onOpenSearch={() => { setShowSearch(true); setShowAccount(false); setShowAdmin(false); }}
+        onOpenAccount={() => { setShowAccount(true); setShowSearch(false); setShowAdmin(false); }}
+        onOpenAdmin={() => { setShowAdmin(true); setShowSearch(false); setShowAccount(false); }}
+        isAdmin={!!authMe?.is_admin}
         refreshKey={refreshKey}
         hasOverride={!!override}
         authUser={authUser}
         onLogout={handleLogout}
       />
-      <ChatInterface
-        conversationId={activeId}
-        onMessageSent={handleMessageSent}
-        override={override}
-      />
+      {showAdmin ? (
+        <AdminPage
+          onClose={() => setShowAdmin(false)}
+          currentUserId={authMe?.id}
+        />
+      ) : showAccount ? (
+        <AccountPage
+          user={authMe || { email: authUser }}
+          onClose={() => setShowAccount(false)}
+          onLogoutAfterDelete={handleLogout}
+          onEmailChanged={(newEmail) => {
+            setAuthUser(newEmail);
+            setAuthMe((m) => (m ? { ...m, email: newEmail, username: newEmail } : m));
+          }}
+          onKeyChanged={(present) => {
+            setAuthMe((m) => (m ? { ...m, has_key: !!present } : m));
+          }}
+        />
+      ) : showSearch ? (
+        <SearchPage
+          onSelect={handleSelectFromSearch}
+          onClose={() => setShowSearch(false)}
+        />
+      ) : (
+        <ChatInterface
+          conversationId={activeId}
+          onMessageSent={handleMessageSent}
+          override={override}
+          hasKey={authMe ? !!authMe.has_key : null}
+          onOpenAccount={() => { setShowAccount(true); setShowSearch(false); }}
+        />
+      )}
       <ModelSelector
         isOpen={showConfig}
         onClose={() => setShowConfig(false)}
@@ -175,6 +229,7 @@ export default function App() {
         isOpen={showAbout}
         onClose={() => setShowAbout(false)}
       />
-    </div>
+      </div>
+    </ConfirmProvider>
   );
 }

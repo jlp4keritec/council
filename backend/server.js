@@ -34,6 +34,8 @@ import {
   CHAIRMAN_ANALYSIS_ENABLED,
 } from './config.js';
 import * as storage from './storage.js';
+import { searchConversations, getSearchFacets } from './search.js';
+import { pushConversationToCortex } from './cortex.js';
 import {
   runFullCouncil,
   generateConversationTitle,
@@ -118,7 +120,7 @@ async function fetchOpenRouterModels() {
 fastify.get('/', async () => ({
   status: 'ok',
   service: 'LLM Council API',
-  version: '2.8.0',
+  version: '2.13.0',
 }));
 
 fastify.get('/health', async () => ({ status: 'ok' }));
@@ -235,7 +237,7 @@ fastify.get('/api/usage', async (request) => {
     title_model: q.title_model || TITLE_MODEL,
   };
 
-  const conversations = await storage.listConversations();
+  const conversations = await storage.listConversations(request.user);
   const today = new Date().toISOString().slice(0, 10);
   let questionsToday = 0;
   for (const conv of conversations) {
@@ -285,16 +287,35 @@ fastify.post('/api/usage/refresh', async () => {
 // Conversations CRUD
 // ---------------------------------------------------------------------------
 
-fastify.get('/api/conversations', async () => await storage.listConversations());
+fastify.get('/api/conversations', async (request) => await storage.listConversations(request.user));
 
-fastify.post('/api/conversations', async () => {
+// Recherche filtree (mot-cle optionnel + periode + juge + president)
+fastify.get('/api/search', async (request) => {
+  const Q = request.query || {};
+  const criteria = {
+    q: (Q.q || '').trim(),
+    date_from: Q.date_from || null,
+    date_to: Q.date_to || null,
+    judge: Q.judge || null,
+    chairman: Q.chairman || null,
+  };
+  const results = await searchConversations(criteria, request.user);
+  return { criteria, results };
+});
+
+// Liste des juges / presidents presents dans l'historique (pour les menus)
+fastify.get('/api/search/facets', async (request) => {
+  return await getSearchFacets(request.user);
+});
+
+fastify.post('/api/conversations', async (request) => {
   const id = randomUUID();
-  return await storage.createConversation(id);
+  return await storage.createConversation(id, request.user.id);
 });
 
 fastify.get('/api/conversations/:id', async (request, reply) => {
   const conv = await storage.getConversation(request.params.id);
-  if (!conv) {
+  if (!conv || !storage.userCanAccess(conv, request.user)) {
     reply.code(404);
     return { error: 'Conversation introuvable' };
   }
@@ -302,12 +323,51 @@ fastify.get('/api/conversations/:id', async (request, reply) => {
 });
 
 fastify.delete('/api/conversations/:id', async (request, reply) => {
-  const success = await storage.deleteConversation(request.params.id);
-  if (!success) {
+  const existing = await storage.getConversation(request.params.id);
+  if (!existing || !storage.userCanAccess(existing, request.user)) {
     reply.code(404);
     return { error: 'Conversation introuvable' };
   }
+  await storage.deleteConversation(request.params.id);
   return { deleted: true, id: request.params.id };
+});
+
+// ---------------------------------------------------------------------------
+// Envoi vers Cortex (second cerveau)
+// ---------------------------------------------------------------------------
+
+fastify.post('/api/conversations/:id/to-cortex', async (request, reply) => {
+  const { id } = request.params;
+  const { message_index } = request.body || {};
+
+  const conv = await storage.getConversation(id);
+  if (!conv || !storage.userCanAccess(conv, request.user)) {
+    reply.code(404);
+    return { error: 'Conversation introuvable' };
+  }
+
+  // Resoudre l index du message assistant (meme logique que l export)
+  let idx = parseInt(message_index, 10);
+  if (isNaN(idx) || idx < 0 || idx >= conv.messages.length || conv.messages[idx].role !== 'assistant') {
+    idx = -1;
+    for (let i = conv.messages.length - 1; i >= 0; i--) {
+      if (conv.messages[i].role === 'assistant') { idx = i; break; }
+    }
+    if (idx === -1) {
+      reply.code(404);
+      return { error: 'Aucune réponse assistant à envoyer' };
+    }
+  }
+
+  try {
+    const note = await pushConversationToCortex(conv, idx);
+    fastify.log.info(`Note envoyée à Cortex : "${note.title}"`);
+    return { ok: true, title: note.title, tags: note.tags };
+  } catch (err) {
+    fastify.log.error({ err }, 'Echec envoi Cortex');
+    reply.code(502);
+    return { error: err.message || 'Erreur lors de l envoi vers Cortex' };
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -319,7 +379,7 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
   const { format = 'md', message_index } = request.query;
 
   const conv = await storage.getConversation(id);
-  if (!conv) {
+  if (!conv || !storage.userCanAccess(conv, request.user)) {
     reply.code(404);
     return { error: 'Conversation introuvable' };
   }
@@ -388,6 +448,28 @@ fastify.get('/api/conversations/:id/export', async (request, reply) => {
 // Helper override
 // ---------------------------------------------------------------------------
 
+import * as users from './users.js';
+
+/**
+ * Resout la cle OpenRouter a utiliser pour cette requete.
+ * Politique (v2.15, strict) :
+ *  - Utilisateur normal : DOIT avoir sa propre cle dans Mon compte.
+ *  - Administrateur : peut utiliser la cle du .env (filet de securite).
+ * Renvoie { key, source: 'user'|'env' } ou { error, code, message } si refus.
+ */
+async function resolveApiKey(reqUser) {
+  const userKey = await users.getDecryptedKey(reqUser.id);
+  if (userKey) return { key: userKey, source: 'user' };
+  if (reqUser.is_admin && process.env.OPENROUTER_API_KEY) {
+    return { key: process.env.OPENROUTER_API_KEY, source: 'env' };
+  }
+  return {
+    error: true,
+    code: 'no_api_key',
+    message: 'Pour utiliser le Council, ajoute ta clé OpenRouter dans « Mon compte ».',
+  };
+}
+
 function extractOverride(body) {
   const override = body?.override || {};
   const result = {};
@@ -430,10 +512,18 @@ fastify.post('/api/conversations/:id/message', async (request, reply) => {
   }
 
   const conv = await storage.getConversation(id);
-  if (!conv) {
+  if (!conv || !storage.userCanAccess(conv, request.user)) {
     reply.code(404);
     return { error: 'Conversation introuvable' };
   }
+
+  // Resoudre la cle OpenRouter de l'utilisateur (strict v2.15)
+  const keyResult = await resolveApiKey(request.user);
+  if (keyResult.error) {
+    reply.code(403);
+    return { error: keyResult.code, message: keyResult.message };
+  }
+  override.apiKey = keyResult.key;
 
   const isFirstMessage = conv.messages.length === 0;
   await storage.addUserMessage(id, content);
@@ -472,10 +562,18 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
   }
 
   const conv = await storage.getConversation(id);
-  if (!conv) {
+  if (!conv || !storage.userCanAccess(conv, request.user)) {
     reply.code(404);
     return { error: 'Conversation introuvable' };
   }
+
+  // Resoudre la cle OpenRouter (strict v2.15) AVANT d'ouvrir le flux SSE
+  const keyResult = await resolveApiKey(request.user);
+  if (keyResult.error) {
+    reply.code(403);
+    return { error: keyResult.code, message: keyResult.message };
+  }
+  override.apiKey = keyResult.key;
 
   const isFirstMessage = conv.messages.length === 0;
 
@@ -623,6 +721,169 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
   } finally {
     reply.raw.end();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Panneau Administrateur (v2.16)
+// ---------------------------------------------------------------------------
+// Toutes les routes /api/admin/* exigent un compte AVEC `is_admin === true`.
+// Sinon -> 403.
+
+function requireAdmin(request, reply) {
+  if (!request.user || !request.user.is_admin) {
+    reply.code(403);
+    reply.send({ error: 'forbidden', message: 'Accès réservé aux administrateurs.' });
+    return false;
+  }
+  return true;
+}
+
+// Calcule les stats par utilisateur a partir des conversations stockees.
+// Renvoie une map userId -> { conv_count, total_cost_usd, last_active_at }.
+async function computeUserStats() {
+  // Pas de filtre user -> on voit TOUTES les conversations (admin only context)
+  const all = await storage.listConversations();
+  const byUser = new Map();
+  for (const item of all) {
+    if (!item.owner) continue; // conversations legacy : ignorees pour stats par user
+    const conv = await storage.getConversation(item.id);
+    if (!conv) continue;
+    const stats = byUser.get(conv.owner) || { conv_count: 0, total_cost_usd: 0, last_active_at: null };
+    stats.conv_count += 1;
+    let convLast = conv.created_at;
+    for (const msg of conv.messages || []) {
+      if (msg.created_at && (!convLast || msg.created_at > convLast)) convLast = msg.created_at;
+      if (msg.role === 'assistant') {
+        const cost = msg.pricing?.total?.total_cost_usd;
+        if (typeof cost === 'number' && Number.isFinite(cost)) stats.total_cost_usd += cost;
+      }
+    }
+    if (!stats.last_active_at || (convLast && convLast > stats.last_active_at)) {
+      stats.last_active_at = convLast;
+    }
+    byUser.set(conv.owner, stats);
+  }
+  return byUser;
+}
+
+// GET /api/admin/users  -> liste enrichie + stats
+fastify.get('/api/admin/users', async (request, reply) => {
+  if (!requireAdmin(request, reply)) return;
+
+  const all = await users.listAllUsers();
+  const stats = await computeUserStats();
+
+  const usersWithStats = all.map((u) => {
+    const s = stats.get(u.id) || { conv_count: 0, total_cost_usd: 0, last_active_at: null };
+    return {
+      ...u,
+      conv_count: s.conv_count,
+      total_cost_usd: Math.round(s.total_cost_usd * 10000) / 10000, // 4 décimales
+      last_active_at: s.last_active_at,
+      // marquage utile cote client pour le "tu ne peux pas te toucher toi-meme"
+      is_self: u.id === request.user.id,
+    };
+  });
+
+  // Stats globales
+  const totals = {
+    users_count: all.length,
+    active_users: all.filter((u) => !u.is_disabled).length,
+    users_with_key: all.filter((u) => u.has_key).length,
+    admins_count: all.filter((u) => u.is_admin).length,
+    total_conversations: usersWithStats.reduce((s, u) => s + u.conv_count, 0),
+    total_cost_usd: Math.round(usersWithStats.reduce((s, u) => s + u.total_cost_usd, 0) * 10000) / 10000,
+  };
+
+  return { totals, users: usersWithStats };
+});
+
+// PATCH /api/admin/users/:id  body: { is_active?, is_admin? }
+fastify.patch('/api/admin/users/:id', async (request, reply) => {
+  if (!requireAdmin(request, reply)) return;
+  const targetId = request.params.id;
+  if (targetId === request.user.id) {
+    reply.code(400);
+    return { error: 'self_target', message: 'Tu ne peux pas modifier ton propre statut.' };
+  }
+  const body = request.body || {};
+  try {
+    let updated = null;
+    if (typeof body.is_active === 'boolean') {
+      updated = await users.setActive(targetId, body.is_active);
+      fastify.log.info(`[admin ${request.user.email}] ${body.is_active ? 'réactivé' : 'désactivé'} : ${updated.email}`);
+    }
+    if (typeof body.is_admin === 'boolean') {
+      updated = await users.setAdmin(targetId, body.is_admin);
+      fastify.log.info(`[admin ${request.user.email}] ${body.is_admin ? 'promu admin' : 'rétrogradé'} : ${updated.email}`);
+    }
+    if (!updated) {
+      reply.code(400);
+      return { error: 'no_change', message: 'Aucun changement (is_active ou is_admin requis).' };
+    }
+    return { ok: true, user: updated };
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') {
+      reply.code(404);
+      return { error: 'not_found', message: 'Utilisateur introuvable.' };
+    }
+    throw err;
+  }
+});
+
+// POST /api/admin/users/:id/reset-password  -> renvoie le mot de passe temporaire
+fastify.post('/api/admin/users/:id/reset-password', async (request, reply) => {
+  if (!requireAdmin(request, reply)) return;
+  const targetId = request.params.id;
+  if (targetId === request.user.id) {
+    reply.code(400);
+    return { error: 'self_target', message: 'Utilise « Mon compte » pour ton propre mot de passe.' };
+  }
+  try {
+    const { temp_password } = await users.adminResetPassword(targetId);
+    const u = await users.findById(targetId);
+    fastify.log.info(`[admin ${request.user.email}] reset mot de passe : ${u?.email || targetId}`);
+    return { ok: true, temp_password, email: u?.email || null };
+  } catch (err) {
+    if (err.code === 'NOT_FOUND') {
+      reply.code(404);
+      return { error: 'not_found', message: 'Utilisateur introuvable.' };
+    }
+    throw err;
+  }
+});
+
+// DELETE /api/admin/users/:id  -> supprime compte + ses conversations
+fastify.delete('/api/admin/users/:id', async (request, reply) => {
+  if (!requireAdmin(request, reply)) return;
+  const targetId = request.params.id;
+  if (targetId === request.user.id) {
+    reply.code(400);
+    return { error: 'self_target', message: 'Utilise « Mon compte » pour te supprimer toi-même.' };
+  }
+
+  // 1) Conversations de l'utilisateur cible
+  const targetUser = await users.findById(targetId);
+  if (!targetUser) {
+    reply.code(404);
+    return { error: 'not_found', message: 'Utilisateur introuvable.' };
+  }
+  // listConversations sans user -> on voit TOUTES les conversations,
+  // puis on filtre nous-memes sur owner === targetId.
+  const list = await storage.listConversations();
+  let removed = 0;
+  for (const item of list) {
+    if (item.owner === targetId) {
+      if (await storage.deleteConversation(item.id)) removed += 1;
+    }
+  }
+  // 2) Suppression du compte (sans password : route admin)
+  const db = await users.listAllUsers(); // pour pouvoir invalider le cache si besoin
+  // On a deja la fonction users.deleteUser mais elle exige le mot de passe. On
+  // ajoute un mode admin : effacement direct via users.adminDelete ci-dessous.
+  await users.adminDelete(targetId);
+  fastify.log.info(`[admin ${request.user.email}] compte supprimé + ${removed} conversations : ${targetUser.email}`);
+  return { ok: true, deleted_conversations: removed, email: targetUser.email };
 });
 
 // ---------------------------------------------------------------------------

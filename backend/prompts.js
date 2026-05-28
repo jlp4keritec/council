@@ -144,3 +144,46 @@ Question : ${userQuery}
 
 Titre :`;
 }
+
+/**
+ * Variante v2.10 : demande titre + theme en un seul appel (replie dans l'appel
+ * de titre existant -> aucun appel API supplementaire). Le theme sert au
+ * leaderboard data-driven par domaine.
+ *
+ * @param {string} userQuery
+ * @param {string[]} themeVocab  vocabulaire controle (le modele DOIT choisir dedans)
+ */
+export function titleAndThemePrompt(userQuery, themeVocab) {
+  const vocab = (themeVocab && themeVocab.length ? themeVocab : ['divers']).join(', ');
+  return `Analyse la question suivante et produis DEUX choses :
+1. un titre tres court (3 a 5 mots max), concis et descriptif, sans guillemets ni ponctuation finale ;
+2. un theme, choisi OBLIGATOIREMENT dans cette liste fermee : ${vocab}.
+   Choisis le theme le plus pertinent. En cas de doute, utilise "divers".
+
+QUESTION : ${userQuery}
+
+REPONDS UNIQUEMENT EN JSON VALIDE, sans texte avant ni apres, selon ce schema exact :
+{"title": "...", "theme": "..."}
+
+Reponds maintenant :`;
+}
+
+/**
+ * Prompt systeme de grounding (v2.10) : injecte les sources juridiques
+ * recuperees via MCP avant le Stage 1. On demande aux membres du conseil de
+ * s'appuyer en priorite sur ces sources et de citer leurs references, sans
+ * inventer ce qui n'y figure pas.
+ */
+export function groundingSystemPrompt(sourcesText) {
+  return `Tu disposes de SOURCES JURIDIQUES OFFICIELLES recuperees automatiquement
+pour cette question. Appuie-toi EN PRIORITE sur ces sources :
+- cite explicitement les references qui en proviennent (articles, decisions, numeros) ;
+- si une affirmation ne figure pas dans les sources, signale-la comme ton analyse propre, sans inventer de reference ;
+- si les sources sont hors sujet ou insuffisantes, dis-le clairement plutot que de combler par une reference non verifiee.
+
+=== SOURCES ===
+
+${sourcesText}
+
+=== FIN DES SOURCES ===`;
+}

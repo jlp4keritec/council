@@ -13,9 +13,10 @@ import {
 } from './config.js';
 import { extractUsage } from './pricing.js';
 
-function buildHeaders() {
+function buildHeaders(apiKey) {
+  const key = apiKey || OPENROUTER_API_KEY;
   return {
-    Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+    Authorization: `Bearer ${key}`,
     'Content-Type': 'application/json',
     // Optionnels mais visibles dans le dashboard OpenRouter
     'HTTP-Referer': OPENROUTER_HTTP_REFERER,
@@ -91,10 +92,12 @@ export async function queryModel(model, messages, options = {}) {
     timeout = REQUEST_TIMEOUT,
     responseFormat = null,
     maxRetries = MAX_RETRIES,
+    apiKey = null,
   } = options;
 
-  if (!OPENROUTER_API_KEY) {
-    console.error('OPENROUTER_API_KEY non defini');
+  const effectiveKey = apiKey || OPENROUTER_API_KEY;
+  if (!effectiveKey) {
+    console.error('Aucune cle OpenRouter disponible (ni utilisateur, ni .env)');
     return null;
   }
 
@@ -110,7 +113,7 @@ export async function queryModel(model, messages, options = {}) {
     payload.response_format = responseFormat;
   }
 
-  const headers = buildHeaders();
+  const headers = buildHeaders(effectiveKey);
   let lastError = null;
   const startTime = Date.now();
 
@@ -203,10 +206,11 @@ export async function queryModelsParallel(models, messages, options = {}) {
  * @returns {Promise<{model, status, latency_ms, error?}>}
  *   status: 'up' | 'rate_limited' | 'unavailable' | 'auth_error' | 'unknown'
  */
-export async function pingModel(model) {
+export async function pingModel(model, apiKey = null) {
   const startTime = Date.now();
-  if (!OPENROUTER_API_KEY) {
-    return { model, status: 'auth_error', latency_ms: 0, error: 'OPENROUTER_API_KEY non defini' };
+  const effectiveKey = apiKey || OPENROUTER_API_KEY;
+  if (!effectiveKey) {
+    return { model, status: 'auth_error', latency_ms: 0, error: 'Aucune cle OpenRouter disponible' };
   }
 
   // Payload minimal : 1 token max en sortie, pas de retry pour avoir le statut "live"
@@ -223,7 +227,7 @@ export async function pingModel(model) {
 
     const response = await fetch(OPENROUTER_API_URL, {
       method: 'POST',
-      headers: buildHeaders(),
+      headers: buildHeaders(effectiveKey),
       body: JSON.stringify(payload),
       signal: controller.signal,
     });

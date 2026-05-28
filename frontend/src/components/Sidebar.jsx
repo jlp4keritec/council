@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { formatDateTooltip } from '../utils.js';
+import { useConfirm } from './ConfirmDialog.jsx';
 
 const MAX_SLOTS = 20;
 
@@ -44,7 +45,8 @@ async function refreshOpenRouterStatus() {
 
 export default function Sidebar({
   activeId, onSelect, onNew,
-  onOpenConfig, onOpenQuotaHelp,
+  onOpenConfig, onOpenQuotaHelp, onOpenSearch, onOpenAccount, onOpenAdmin,
+  isAdmin,
   refreshKey, hasOverride,
   authUser, onLogout,
 }) {
@@ -52,6 +54,7 @@ export default function Sidebar({
   const [config, setConfig] = useState(null);
   const [usage, setUsage] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const confirm = useConfirm();
 
   useEffect(() => {
     api.listConversations().then(setConversations).catch(console.error);
@@ -75,15 +78,25 @@ export default function Sidebar({
 
   async function handleDelete(e, id) {
     e.stopPropagation();
-    if (!confirm('Supprimer cette conversation ?')) return;
+    const ok = await confirm({
+      title: 'Supprimer cette conversation ?',
+      message: 'La conversation et toutes ses réponses seront définitivement effacées.',
+      confirmLabel: 'Supprimer',
+      danger: true,
+    });
+    if (!ok) return;
     await api.deleteConversation(id);
     const updated = await api.listConversations();
     setConversations(updated);
     if (activeId === id) onSelect(null);
   }
 
-  function handleLogoutClick() {
-    if (!confirm('Se déconnecter ?')) return;
+  async function handleLogoutClick() {
+    const ok = await confirm({
+      title: 'Se déconnecter ?',
+      confirmLabel: 'Se déconnecter',
+    });
+    if (!ok) return;
     onLogout?.();
   }
 
@@ -217,6 +230,17 @@ export default function Sidebar({
       )}
 
       <div className="sidebar-config">
+        <button className="sidebar-config-btn" onClick={onOpenSearch}>
+          <span>🔍 Recherche</span>
+        </button>
+        <button className="sidebar-config-btn" onClick={onOpenAccount}>
+          <span>👤 Mon compte</span>
+        </button>
+        {isAdmin && (
+          <button className="sidebar-config-btn" onClick={onOpenAdmin} title="Panneau administrateur">
+            <span>🛡️ Admin</span>
+          </button>
+        )}
         <button className="sidebar-config-btn" onClick={onOpenConfig}>
           <span>⚙ Configuration</span>
           {hasOverride && <span className="sidebar-config-badge" title="Override actif">●</span>}
@@ -243,7 +267,12 @@ export default function Sidebar({
       {/* Bandeau user + logout (v2.8) */}
       {(authUser || onLogout) && (
         <div className="sidebar-auth">
-          <div className="sidebar-auth-user">
+          <div
+            className="sidebar-auth-user"
+            onClick={onOpenAccount}
+            title="Mon compte (mot de passe, email…)"
+            style={{ cursor: onOpenAccount ? 'pointer' : 'default' }}
+          >
             <span className="sidebar-auth-dot"></span>
             <span className="sidebar-auth-name">{authUser || 'Connecté'}</span>
           </div>

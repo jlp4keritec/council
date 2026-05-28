@@ -1,16 +1,11 @@
 {
   "name": "llm-council",
-  "version": "2.9.1",
-  "description": "LLM Council Node.js — orchestration multi-modèles via OpenRouter, avec auth mono-user",
+  "version": "2.16.0",
+  "description": "LLM Council Node.js — orchestration multi-modèles via OpenRouter, multi-utilisateur complet (cle par utilisateur + panneau admin)",
   "type": "module",
   "main": "backend/server.js",
-  "engines": {
-    "node": ">=20.0.0"
-  },
-  "scripts": {
-    "start": "node backend/server.js",
-    "dev": "node --watch backend/server.js"
-  },
+  "engines": { "node": ">=20.0.0" },
+  "scripts": { "start": "node backend/server.js", "dev": "node --watch backend/server.js" },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
     "docx": "^9.6.1",
