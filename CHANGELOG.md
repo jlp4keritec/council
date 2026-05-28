@@ -18,6 +18,19 @@ et ce projet adhère au [versionnage sémantique](https://semver.org/lang/fr/).
 
 ---
 
+## [2.16.1] - 2026-05-28
+
+### Changed
+- **Plus aucune popup native du navigateur (« localhost:5180 indique… »)**. Toutes les confirmations passent désormais par une **modale custom propre** `ConfirmDialog` : centrée, fond légèrement flouté, animation d'apparition, fermeture par Échap, validation par Entrée, bouton danger rouge pour les actions destructives.
+  - Remplacé dans : déconnexion + suppression de conversation (`Sidebar.jsx`), suppression de clé OpenRouter + suppression de compte (`AccountPage.jsx`), promotion/rétrogradation admin + reset mot de passe + suppression utilisateur (`AdminPage.jsx`).
+  - Nouveau fichier : `frontend/src/components/ConfirmDialog.jsx` (Provider + hook `useConfirm()` qui renvoie une promesse `true`/`false`).
+  - `App.jsx` enveloppé avec `<ConfirmProvider>`.
+- **Dates précises dans le panneau Admin** : colonne « Créé » et colonne « Dernière activité » passent au format **`JJ/MM/AAAA HH:MM`** (heure locale). Plus de « jamais » ni « aujourd'hui » imprécis.
+- **Modale du mot de passe temporaire restylée** dans le panneau Admin (look cohérent avec la `ConfirmDialog`) : centrée, blur léger, bouton « ✓ Copié » avec retour visuel, bouton « Fermer ».
+- **Messages d'erreur Admin** : remplacés par un mini-toast en haut de page (auto-disparition après 3,5 s) au lieu de `alert()` natifs.
+
+---
+
 ## [2.16.0] - 2026-05-28
 
 ### Added

@@ -1,33 +1,71 @@
-# Node
+# =============================================================================
+# .gitignore -- LLM Council (Node.js + React/Vite)
+# =============================================================================
+
+# --- Node ---
 node_modules/
-dist/
-.vite/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-.pnpm-debug.log*
+pnpm-debug.log*
 
-# Secrets & data
+# --- Build outputs ---
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# --- Environment (NE JAMAIS COMMITER) ---
 .env
 .env.*
 !.env.example
-!.env.example.free
-data/
 
-# Logs
+# --- Donnees utilisateur (NE JAMAIS COMMITER) ---
+# Conversations, comptes, leaderboard, etc.
+data/
+backend/data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# --- Logs ---
 logs/
 *.log
 
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Deploy artifacts
-deploy.zip
-deploy-config.json
+# --- Archives de deploy (deploy.zip, backups) ---
+*.zip
 *.bak
 *.tmp
+*.tar
+*.tar.gz
+*.tgz
+
+# --- Deploy / SSH (NE JAMAIS COMMITER) ---
+deploy-config.json
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- PowerShell scripts d'ops (souvent specifiques machine locale) ---
+# Decommenter si tu ne veux PAS commiter tes scripts deploy/diag :
+# deploy-*.ps1
+# diag-*.ps1
+# audit-*.ps1
+# upload-*.ps1
+
+# --- Caches divers ---
+.cache/
+.parcel-cache/
+.next/
+.nuxt/

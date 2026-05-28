@@ -16,6 +16,10 @@
 #   .\deploy-council.ps1 -SkipBuild         # saute le build frontend (deja fait)
 #   .\deploy-council.ps1 -SkipNginx -SkipCertbot   # debug
 #   .\deploy-council.ps1 -LogsAfter         # affiche pm2 logs apres deploy
+#   .\deploy-council.ps1 -UpdateNginx       # force la regen de la conf Nginx
+#
+# v2.16.1 : ajout automatique des vars multi-user au .env si absentes
+#           (SESSION_SECRET et OPENROUTER_KEYS_SECRET generes via openssl)
 # =============================================================================
 
 param(
@@ -24,7 +28,7 @@ param(
     [switch]$SkipNginx,
     [switch]$SkipCertbot,
     [switch]$LogsAfter,
-    [switch]$UpdateNginx,   # v2.8 : force la regen de la conf Nginx (apres ajout landing)
+    [switch]$UpdateNginx,
     [string]$ProjectPath = $PSScriptRoot
 )
 
@@ -38,7 +42,7 @@ $REMOTE_DIR   = "/home/ubuntu/$PROJECT_NAME"
 $DOMAIN       = "mesoutilsagile.com"
 $SUBDOMAIN    = "council"
 $FQDN         = "$SUBDOMAIN.$DOMAIN"
-$APP_PORT     = 5706   # premier port libre apres dila-mcp (5705)
+$APP_PORT     = 5706
 $PM2_NAME     = $PROJECT_NAME
 
 # -----------------------------------------------------------------------------
@@ -165,7 +169,6 @@ function New-DeployPackage {
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
     # Exclusion par SEGMENT (matche partout dans le chemin, pas seulement a la racine)
-    # ex: frontend/node_modules/foo sera bien exclu grace au segment "node_modules"
     $excludeSegments = @(
         "node_modules", ".git", ".vscode", ".idea", "logs",
         "data", ".vite"
@@ -181,12 +184,10 @@ function New-DeployPackage {
         $rel = $_.FullName.Substring($ProjectPath.Length).TrimStart('\','/')
         $segments = $rel -split '[\\/]'
 
-        # Exclusion si un segment du path est dans la liste
         $excluded = $false
         foreach ($seg in $segments) {
             if ($excludeSegments -contains $seg) { $excluded = $true; break }
         }
-        # Exclusion par pattern de nom de fichier
         if (-not $excluded) {
             foreach ($p in $excludePatterns) {
                 if ($_.Name -like $p) { $excluded = $true; break }
@@ -197,9 +198,6 @@ function New-DeployPackage {
 
     Write-Info "$($allItems.Count) fichiers a inclure"
 
-    # PS5.1 : charger explicitement les DEUX assemblies (ZipArchiveMode est dans
-    # System.IO.Compression, ZipFile est dans System.IO.Compression.FileSystem).
-    # -ErrorAction SilentlyContinue : si deja charge, pas grave.
     Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
     Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
 
@@ -252,12 +250,13 @@ echo "Nginx:  $(nginx -v 2>&1)"
 if ! command -v unzip > /dev/null; then
   sudo apt-get install -y unzip
 fi
+if ! command -v openssl > /dev/null; then
+  sudo apt-get install -y openssl
+fi
 
-# Verif version Node : il faut >= 20 pour fetch natif + AbortController
 NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
 if [ "$NODE_MAJOR" -lt 20 ]; then
   echo "ATTENTION : Node $NODE_MAJOR detecte, version >= 20 requise pour LLM Council"
-  echo "Le projet utilise fetch natif disponible depuis Node 18 (recommande 20+)"
 fi
 '@
     $rc = Invoke-SshBashScript $cfg $bash
@@ -266,12 +265,12 @@ fi
 }
 
 # -----------------------------------------------------------------------------
-# Extract + npm install + PM2 (cur principal -- TRES simplifie vs version Python)
+# Extract + npm install + PM2
 # -----------------------------------------------------------------------------
 function Invoke-CodeDeploy {
     param(
         $cfg,
-        [switch]$SkipPm2   # en mode -Init, on laisse Initialize-RemoteEnv demarrer PM2 apres avoir cree le .env
+        [switch]$SkipPm2
     )
     if ($SkipPm2) {
         Write-Step "Extraction + npm install (PM2 sera demarre apres creation du .env)"
@@ -316,23 +315,59 @@ echo "==> 4. Restauration .env / data"
 
 sudo chown -R $USER:$USER "$REMOTE_DIR"
 
-echo "==> 4b. Patch .env pour ajouter les vars auth v2.8 si absentes"
+echo "==> 4b. Patch .env -- ajoute vars manquantes (v2.8 mono-user + v2.16 multi-user)"
 ENV_FILE="$REMOTE_DIR/.env"
 if [ -f "$ENV_FILE" ]; then
+
+  # ---- v2.8 (mono-user) ----
   if ! grep -q "^ADMIN_USERNAME=" "$ENV_FILE"; then
     echo "" >> "$ENV_FILE"
-    echo "# v2.8 -- Auth mono-user" >> "$ENV_FILE"
+    echo "# v2.8 -- Auth mono-user (admin legacy)" >> "$ENV_FILE"
     echo "ADMIN_USERNAME=admin" >> "$ENV_FILE"
-    echo "[OK] ADMIN_USERNAME ajoute au .env"
+    echo "[OK] ADMIN_USERNAME ajoute"
   fi
   if ! grep -q "^SESSION_DURATION_DAYS=" "$ENV_FILE"; then
     echo "SESSION_DURATION_DAYS=30" >> "$ENV_FILE"
-    echo "[OK] SESSION_DURATION_DAYS ajoute au .env"
+    echo "[OK] SESSION_DURATION_DAYS ajoute"
   fi
   if ! grep -q "^NODE_ENV=" "$ENV_FILE"; then
     echo "NODE_ENV=production" >> "$ENV_FILE"
-    echo "[OK] NODE_ENV=production ajoute au .env (cookie Secure actif)"
+    echo "[OK] NODE_ENV=production ajoute (cookie Secure actif)"
   fi
+
+  # ---- v2.16 multi-user ----
+  # IMPORTANT : les secrets aleatoires sont generes UNE SEULE FOIS
+  # (si absents). Ne JAMAIS regenerer ou ecraser, sinon :
+  #  - SESSION_SECRET regenere = toutes les sessions actives invalidees
+  #  - OPENROUTER_KEYS_SECRET regenere = cles OpenRouter chiffrees illisibles
+
+  if ! grep -q "^SESSION_SECRET=" "$ENV_FILE"; then
+    SECRET=$(openssl rand -hex 32)
+    echo "" >> "$ENV_FILE"
+    echo "# v2.16 -- Multi-user" >> "$ENV_FILE"
+    echo "SESSION_SECRET=$SECRET" >> "$ENV_FILE"
+    echo "[OK] SESSION_SECRET genere (32 octets aleatoires)"
+  fi
+  if ! grep -q "^OPENROUTER_KEYS_SECRET=" "$ENV_FILE"; then
+    SECRET=$(openssl rand -hex 32)
+    echo "OPENROUTER_KEYS_SECRET=$SECRET" >> "$ENV_FILE"
+    echo "[OK] OPENROUTER_KEYS_SECRET genere (chiffrement cles OpenRouter par user)"
+  fi
+  if ! grep -q "^PASSWORD_MIN_LENGTH=" "$ENV_FILE"; then
+    echo "PASSWORD_MIN_LENGTH=8" >> "$ENV_FILE"
+    echo "[OK] PASSWORD_MIN_LENGTH=8 ajoute"
+  fi
+  if ! grep -q "^USERS_FILE=" "$ENV_FILE"; then
+    echo "USERS_FILE=data/users.json" >> "$ENV_FILE"
+    echo "[OK] USERS_FILE ajoute"
+  fi
+  if ! grep -q "^LEADERBOARD_FILE=" "$ENV_FILE"; then
+    echo "LEADERBOARD_FILE=data/leaderboard.json" >> "$ENV_FILE"
+    echo "[OK] LEADERBOARD_FILE ajoute"
+  fi
+
+  # ---- Permissions strictes sur le .env (contient des secrets) ----
+  chmod 600 "$ENV_FILE"
 fi
 
 echo "==> 5. npm install (backend)"
@@ -379,13 +414,13 @@ fi
 }
 
 # -----------------------------------------------------------------------------
-# Init .env (premier deploiement)
+# Init .env (premier deploiement seulement, mode -Init)
 # -----------------------------------------------------------------------------
 function Initialize-RemoteEnv {
     param($cfg)
     Write-Step "Generation .env initial (premier deploiement)"
 
-    $apiKey = Read-Host "OpenRouter API Key (sk-or-v1-...)"
+    $apiKey = Read-Host "OpenRouter API Key admin (sk-or-v1-...)"
     if ([string]::IsNullOrWhiteSpace($apiKey)) {
         throw "OPENROUTER_API_KEY est REQUIS pour que l'app fonctionne"
     }
@@ -395,6 +430,10 @@ set -e
 REMOTE_DIR=__REMOTE_DIR__
 API_KEY=__API_KEY__
 FQDN=__FQDN__
+
+# Generer secrets aleatoires
+SESSION_SECRET=$(openssl rand -hex 32)
+KEYS_SECRET=$(openssl rand -hex 32)
 
 cat > "$REMOTE_DIR/.env" <<ENVEOF
 OPENROUTER_API_KEY=$API_KEY
@@ -407,14 +446,10 @@ TITLE_MODEL=google/gemini-2.5-flash
 
 EVAL_CRITERIA=precision factuelle, pertinence par rapport a la question, profondeur d'analyse, clarte de la formulation.
 
-# Robustesse Council (fallback automatique si moins de N modeles repondent)
 COUNCIL_MIN_RESPONSES=3
 COUNCIL_FALLBACK_POOL=deepseek/deepseek-chat-v3.1:free,qwen/qwen3-235b-a22b:free,openrouter/free,openrouter/free
 
-# Analyse meta-cognitive du Chairman (true = 2 onglets Synthese + Analyse)
 CHAIRMAN_ANALYSIS_ENABLED=true
-
-# Quota journalier (5 sans credit, 100 avec 10\$ deposes, 10000 en payant pur)
 DAILY_QUOTA_QUESTIONS=100
 
 REQUEST_TIMEOUT=180000
@@ -431,13 +466,20 @@ NODE_ENV=production
 
 CORS_ORIGINS=https://$FQDN
 
-# v2.8 -- Auth mono-user (admin + OPENROUTER_API_KEY)
+# v2.8 -- Auth mono-user (admin legacy)
 ADMIN_USERNAME=admin
 SESSION_DURATION_DAYS=30
+
+# v2.16 -- Multi-user
+SESSION_SECRET=$SESSION_SECRET
+OPENROUTER_KEYS_SECRET=$KEYS_SECRET
+PASSWORD_MIN_LENGTH=8
+USERS_FILE=data/users.json
+LEADERBOARD_FILE=data/leaderboard.json
 ENVEOF
 
 chmod 600 "$REMOTE_DIR/.env"
-echo "[OK] .env cree avec permissions 600"
+echo "[OK] .env cree avec permissions 600 (secrets generes via openssl)"
 
 pm2 delete __PM2_NAME__ 2>/dev/null || true
 cd "$REMOTE_DIR"
@@ -524,9 +566,6 @@ server {
     }
 
     # --- Landing page sur la racine exacte (v2.8) ---
-    # Si l'utilisateur arrive sur https://council.mesoutilsagile.com/, on lui
-    # sert la landing statique. Le bouton CTA pointe vers /app qui retombe
-    # dans le SPA fallback ci-dessous.
     location = / {
         try_files /landing.html =404;
     }
@@ -623,18 +662,13 @@ Send-DeployPackage $cfg $zipPath
 
 if ($Init) {
     Install-VpsPrerequisites $cfg
-    # En mode -Init : on extract le code mais on NE demarre PAS PM2 maintenant
-    # (le .env n'existe pas encore, PM2 prendrait les defaults et le health echouerait)
     Invoke-CodeDeploy $cfg -SkipPm2
-    Initialize-RemoteEnv $cfg   # cree .env puis PM2 start + health check
+    Initialize-RemoteEnv $cfg
     Invoke-NginxSetup $cfg
     Invoke-Certbot $cfg
 } else {
-    # Mise a jour standard : le .env existe deja, PM2 redemarre directement
     Invoke-CodeDeploy $cfg
 
-    # v2.8 : -UpdateNginx force la regen de la conf Nginx
-    # (utile apres l'ajout de la landing pour activer location = /)
     if ($UpdateNginx) {
         Invoke-NginxSetup $cfg
     }
