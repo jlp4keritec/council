@@ -19,29 +19,33 @@ const PROTOCOL_VERSION = '2025-06-18';
 const SERVER_VERSION = '2.11.0';
 let rpcId = 0;
 
-function mcpEndpoint() {
-  return `${(CORTEX_MCP_URL || '').replace(/\/+$/, '')}/mcp`;
+function mcpEndpoint(baseUrl) {
+  const url = baseUrl || CORTEX_MCP_URL || '';
+  return `${url.replace(/\/+$/, '')}/mcp`;
 }
 
 // Appel JSON-RPC unique vers le serveur MCP Cortex.
+// `conn` = { url, token } (override par utilisateur ; retombe sur le .env si absent).
 // Renvoie { result, sessionId } ; jette une erreur parlante en cas de souci.
-async function rpc(method, params, sessionId) {
+async function rpc(method, params, sessionId, conn = {}) {
+  const token = conn.token || CORTEX_MCP_TOKEN;
+  const endpoint = mcpEndpoint(conn.url);
   const headers = {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
-    authorization: `Bearer ${CORTEX_MCP_TOKEN}`,
+    authorization: `Bearer ${token}`,
   };
   if (sessionId) headers['mcp-session-id'] = sessionId;
 
   let res;
   try {
-    res = await fetch(mcpEndpoint(), {
+    res = await fetch(endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method, params }),
     });
   } catch (err) {
-    throw new Error(`Cortex injoignable (${mcpEndpoint()}) : ${err.message}`);
+    throw new Error(`Cortex injoignable (${endpoint}) : ${err.message}`);
   }
 
   const newSession = res.headers.get('mcp-session-id') || sessionId || null;
@@ -70,9 +74,12 @@ async function rpc(method, params, sessionId) {
 }
 
 // Cree une note dans Cortex. { title, body, tags } -> kb_create_note.
-export async function createCortexNote({ title, body, tags }) {
-  if (!CORTEX_MCP_TOKEN) {
-    throw new Error('CORTEX_MCP_TOKEN manquant dans le .env — impossible d\'écrire dans Cortex.');
+// `conn` = { url, token } : config Cortex de l'utilisateur. Si absent, on
+// retombe sur le .env (CORTEX_MCP_URL / CORTEX_MCP_TOKEN).
+export async function createCortexNote({ title, body, tags }, conn = {}) {
+  const token = conn.token || CORTEX_MCP_TOKEN;
+  if (!token) {
+    throw new Error('Aucun token Cortex. Ajoute ton URL et ton token Cortex dans « Mon compte ».');
   }
 
   // Handshake MCP (defensif : echange le sessionId si le serveur en exige un).
@@ -80,12 +87,13 @@ export async function createCortexNote({ title, body, tags }) {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
     clientInfo: { name: 'llm-council', version: SERVER_VERSION },
-  });
+  }, undefined, conn);
 
   const { result } = await rpc(
     'tools/call',
     { name: 'kb_create_note', arguments: { title, body, tags } },
     init.sessionId,
+    conn,
   );
 
   if (result && result.isError) {
@@ -93,6 +101,21 @@ export async function createCortexNote({ title, body, tags }) {
     throw new Error(`Cortex a rejeté la note : ${txt || 'erreur inconnue'}`);
   }
   return result;
+}
+
+/**
+ * Test de connexion Cortex (handshake MCP seul, sans creer de note).
+ * `conn` = { url, token }. Renvoie true si OK, sinon jette une erreur parlante.
+ */
+export async function testCortexConnection(conn = {}) {
+  const token = conn.token || CORTEX_MCP_TOKEN;
+  if (!token) throw new Error('Aucun token à tester.');
+  await rpc('initialize', {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: { name: 'llm-council', version: SERVER_VERSION },
+  }, undefined, conn);
+  return true;
 }
 
 // --------------------------------------------------------------------------
@@ -165,8 +188,9 @@ export function buildCortexNote(conv, assistantIndex) {
 }
 
 // Point d'entree : construit la note depuis la conversation et l'envoie a Cortex.
-export async function pushConversationToCortex(conv, assistantIndex) {
+// `conn` = { url, token } : config Cortex de l'utilisateur (override du .env).
+export async function pushConversationToCortex(conv, assistantIndex, conn = {}) {
   const note = buildCortexNote(conv, assistantIndex);
-  await createCortexNote(note);
+  await createCortexNote(note, conn);
   return note; // sert a renvoyer titre + tags a l'UI
 }

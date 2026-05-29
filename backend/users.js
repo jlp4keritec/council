@@ -82,6 +82,8 @@ function publicUser(u) {
     is_admin: !!u.is_admin,
     created_at: u.created_at,
     has_key: !!u.openrouter_key_enc,
+    has_cortex: !!u.cortex_token_enc,
+    cortex_url: u.cortex_url || null,
   };
 }
 
@@ -122,6 +124,8 @@ export async function createUser(email, plainPassword) {
     is_admin: isFirst,
     created_at: new Date().toISOString(),
     openrouter_key_enc: null, // rempli à l'Étape 2
+    cortex_url: null,         // config Cortex par user (v2.17)
+    cortex_token_enc: null,   // token Cortex chiffré (v2.17)
   };
   db.users.push(user);
   await persist();
@@ -327,4 +331,47 @@ export async function getDecryptedKey(userId) {
   const u = await findById(userId);
   if (!u || !u.openrouter_key_enc) return null;
   return decryptSecret(u.openrouter_key_enc);
+}
+
+// ---------------------------------------------------------------------------
+// Config Cortex par utilisateur (v2.17) — URL + token chiffre
+// ---------------------------------------------------------------------------
+
+/**
+ * Enregistre la config Cortex de l'utilisateur (URL + token chiffre).
+ * Pas de verification de mot de passe : on est deja derriere la session.
+ */
+export async function setCortexConfig(userId, url, plainToken) {
+  if (typeof plainToken !== 'string' || plainToken.trim().length < 8) {
+    const e = new Error('Token Cortex invalide (trop court).');
+    e.code = 'BAD_TOKEN';
+    throw e;
+  }
+  const cleanUrl = String(url || '').trim().replace(/\/+$/, '') || null;
+  const enc = encryptSecret(plainToken.trim());
+  return updateAndSave(userId, (user) => {
+    user.cortex_url = cleanUrl;
+    user.cortex_token_enc = enc;
+  });
+}
+
+/** Supprime la config Cortex de l'utilisateur. */
+export async function clearCortexConfig(userId) {
+  return updateAndSave(userId, (user) => {
+    user.cortex_url = null;
+    user.cortex_token_enc = null;
+  });
+}
+
+/**
+ * Renvoie la config Cortex DECHIFFREE { url, token } de l'utilisateur,
+ * ou null s'il n'a pas de token. Reservee aux appels SERVEUR.
+ */
+export async function getCortexConfig(userId) {
+  const u = await findById(userId);
+  if (!u || !u.cortex_token_enc) return null;
+  return {
+    url: u.cortex_url || null,
+    token: decryptSecret(u.cortex_token_enc),
+  };
 }

@@ -22,6 +22,7 @@ import {
   SESSION_SECRET, SESSION_DURATION_DAYS, PASSWORD_MIN_LENGTH,
 } from './config.js';
 import * as users from './users.js';
+import { testCortexConnection } from './cortex.js';
 
 const COOKIE_NAME = 'llm_council_session';
 const SESSION_MS = SESSION_DURATION_DAYS * 24 * 60 * 60 * 1000;
@@ -257,6 +258,8 @@ export function registerAuthPlugin(fastify) {
       username: u.email, // compat frontend existant (affichage)
       is_admin: !!u.is_admin,
       has_key: !!u.openrouter_key_enc,
+      has_cortex: !!u.cortex_token_enc,
+      cortex_url: u.cortex_url || null,
       created_at: u.created_at,
       expires_at: new Date(payload.exp * 1000).toISOString(),
     };
@@ -429,6 +432,65 @@ export function registerAuthPlugin(fastify) {
     } catch (err) {
       reply.code(502);
       return { ok: false, error: 'network', message: `Impossible de joindre OpenRouter : ${err.message}` };
+    }
+  });
+
+  // ===========================================================================
+  // Config Cortex par utilisateur (v2.17)
+  // ===========================================================================
+
+  // GET /api/auth/cortex-config -> { has_cortex, cortex_url } (jamais le token)
+  fastify.get('/api/auth/cortex-config', async (request) => {
+    const u = await users.findById(request.user.id);
+    return {
+      has_cortex: !!(u && u.cortex_token_enc),
+      cortex_url: (u && u.cortex_url) || null,
+    };
+  });
+
+  // PUT /api/auth/cortex-config { url, token }
+  fastify.put('/api/auth/cortex-config', async (request, reply) => {
+    const { url, token } = request.body || {};
+    if (typeof token !== 'string' || token.trim().length < 8) {
+      reply.code(400);
+      return { error: 'bad_token', message: 'Token Cortex invalide (trop court).' };
+    }
+    try {
+      const updated = await users.setCortexConfig(request.user.id, url, token);
+      fastify.log.info(`[auth] config Cortex enregistree pour ${request.user.email}`);
+      return { ok: true, has_cortex: true, cortex_url: updated.cortex_url || null };
+    } catch (err) {
+      reply.code(500);
+      return { error: 'internal', message: err.message || 'Erreur lors de l\'enregistrement.' };
+    }
+  });
+
+  // DELETE /api/auth/cortex-config
+  fastify.delete('/api/auth/cortex-config', async (request) => {
+    await users.clearCortexConfig(request.user.id);
+    return { ok: true, has_cortex: false };
+  });
+
+  // POST /api/auth/cortex-config/test  -> handshake MCP (sans creer de note)
+  // Body optionnel : { url, token } pour tester AVANT d'enregistrer.
+  fastify.post('/api/auth/cortex-config/test', async (request, reply) => {
+    let conn = null;
+    const b = request.body || {};
+    if (typeof b.token === 'string' && b.token.trim().length >= 8) {
+      conn = { url: (b.url || '').trim() || null, token: b.token.trim() };
+    } else {
+      conn = await users.getCortexConfig(request.user.id);
+    }
+    if (!conn || !conn.token) {
+      reply.code(400);
+      return { ok: false, error: 'no_token', message: 'Aucun token à tester. Renseigne ton token et réessaie.' };
+    }
+    try {
+      await testCortexConnection(conn);
+      return { ok: true, message: 'Connexion Cortex OK ✓' };
+    } catch (err) {
+      reply.code(502);
+      return { ok: false, error: 'network', message: err.message || 'Connexion Cortex impossible.' };
     }
   });
 }

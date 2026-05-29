@@ -112,6 +112,31 @@ export const api = {
       body: JSON.stringify(apiKey ? { api_key: apiKey } : {}),
     }),
 
+  // ------------------- CONFIG CORTEX (v2.17) -------------------
+  /** Lit la config Cortex de l'utilisateur : { has_cortex, cortex_url }. */
+  authGetCortexConfig: () => jsonRequest('/auth/cortex-config'),
+
+  /** Enregistre l'URL + le token Cortex (token chiffre cote serveur). */
+  authSetCortexConfig: (url, token) =>
+    jsonRequest('/auth/cortex-config', {
+      method: 'PUT',
+      body: JSON.stringify({ url, token }),
+    }),
+
+  /** Supprime la config Cortex de l'utilisateur. */
+  authClearCortexConfig: () =>
+    jsonRequest('/auth/cortex-config', { method: 'DELETE' }),
+
+  /**
+   * Teste la connexion Cortex. Si url/token passes, teste ceux-la (avant
+   * enregistrement). Sinon, teste la config deja enregistree.
+   */
+  authTestCortexConfig: (url = null, token = null) =>
+    jsonRequest('/auth/cortex-config/test', {
+      method: 'POST',
+      body: JSON.stringify(token ? { url, token } : {}),
+    }),
+
   // ------------------- ADMIN (v2.16) -------------------
   /** Liste tous les utilisateurs + stats (admin uniquement). */
   adminListUsers: () => jsonRequest('/admin/users'),

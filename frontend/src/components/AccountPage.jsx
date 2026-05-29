@@ -1,6 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { api } from '../api.js';
 import { useConfirm } from './ConfirmDialog.jsx';
+
+const CORTEX_URL_DEFAULT = 'https://cortex.mesoutilsagile.com';
 
 // Petit composant réutilisable pour une "carte" de réglage
 function Section({ title, description, children, danger }) {
@@ -171,6 +173,84 @@ export default function AccountPage({ user, onClose, onLogoutAfterDelete, onEmai
       onKeyChanged?.(false);
     } catch {
       setOrStatus({ kind: 'err', message: 'Erreur lors de la suppression.' });
+    }
+  }
+
+  // ---------- Config Cortex (v2.17) ----------
+  const [cxUrl, setCxUrl] = useState(user?.cortex_url || CORTEX_URL_DEFAULT);
+  const [cxToken, setCxToken] = useState('');
+  const [cxLoading, setCxLoading] = useState(false);
+  const [cxTesting, setCxTesting] = useState(false);
+  const [cxStatus, setCxStatus] = useState(null);
+  const [hasCortex, setHasCortex] = useState(!!user?.has_cortex);
+
+  // Au montage : recuperer l'URL deja enregistree (le token n'est jamais renvoye).
+  useEffect(() => {
+    let cancelled = false;
+    api.authGetCortexConfig()
+      .then((res) => {
+        if (cancelled) return;
+        setHasCortex(!!res.has_cortex);
+        if (res.cortex_url) setCxUrl(res.cortex_url);
+      })
+      .catch(() => { /* silencieux : on garde les valeurs par defaut */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function submitCortex(e) {
+    e.preventDefault();
+    setCxStatus(null);
+    setCxLoading(true);
+    try {
+      const res = await api.authSetCortexConfig(cxUrl.trim() || CORTEX_URL_DEFAULT, cxToken);
+      setCxStatus({ kind: 'ok', message: 'Config Cortex enregistrée (chiffrée). ✓' });
+      setCxToken('');
+      setHasCortex(true);
+      if (res.cortex_url) setCxUrl(res.cortex_url);
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg.includes('400')) setCxStatus({ kind: 'err', message: 'Token invalide (trop court).' });
+      else setCxStatus({ kind: 'err', message: 'Erreur lors de l\'enregistrement.' });
+    } finally {
+      setCxLoading(false);
+    }
+  }
+
+  async function testCortex() {
+    setCxStatus(null);
+    setCxTesting(true);
+    try {
+      // Si un token est tape, on teste url+token. Sinon, on teste la config enregistree.
+      const res = cxToken.trim()
+        ? await api.authTestCortexConfig(cxUrl.trim() || CORTEX_URL_DEFAULT, cxToken.trim())
+        : await api.authTestCortexConfig();
+      if (res.ok) setCxStatus({ kind: 'ok', message: res.message || 'Connexion Cortex OK ✓' });
+      else setCxStatus({ kind: 'err', message: res.message || 'Connexion impossible.' });
+    } catch (err) {
+      const msg = err?.message || '';
+      if (msg.includes('400')) setCxStatus({ kind: 'err', message: 'Aucun token à tester. Renseigne-le et réessaie.' });
+      else setCxStatus({ kind: 'err', message: 'Connexion Cortex impossible.' });
+    } finally {
+      setCxTesting(false);
+    }
+  }
+
+  async function clearCortex() {
+    const ok = await confirm({
+      title: 'Supprimer ta config Cortex ?',
+      message: 'Tu ne pourras plus envoyer de délibération vers Cortex tant que tu n\'en enregistres pas une nouvelle.',
+      confirmLabel: 'Supprimer',
+      danger: true,
+    });
+    if (!ok) return;
+    setCxStatus(null);
+    try {
+      await api.authClearCortexConfig();
+      setHasCortex(false);
+      setCxToken('');
+      setCxStatus({ kind: 'ok', message: 'Config Cortex supprimée. ✓' });
+    } catch {
+      setCxStatus({ kind: 'err', message: 'Erreur lors de la suppression.' });
     }
   }
 
@@ -346,6 +426,91 @@ export default function AccountPage({ user, onClose, onLogoutAfterDelete, onEmai
               </span>
             </div>
             <Status status={orStatus} />
+          </form>
+        </Section>
+
+        {/* ---- Config Cortex (v2.17) ---- */}
+        <Section
+          title="🧠 Mon Cortex (second cerveau)"
+          description={
+            hasCortex
+              ? 'Une config Cortex est enregistrée (token chiffré). Tu peux la remplacer ou la supprimer.'
+              : 'Pour envoyer une délibération vers ton Cortex, renseigne l\'URL et ton token, puis « Tester ».'
+          }
+        >
+          <form onSubmit={submitCortex} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div>
+              <label style={labelStyle}>URL Cortex</label>
+              <input
+                type="text"
+                autoComplete="off"
+                value={cxUrl}
+                onChange={(e) => setCxUrl(e.target.value)}
+                placeholder={CORTEX_URL_DEFAULT}
+                style={fieldStyle}
+                spellCheck={false}
+              />
+            </div>
+            <div>
+              <label style={labelStyle}>
+                {hasCortex ? 'Nouveau token (remplace l\'actuel)' : 'Token Cortex'}
+              </label>
+              <input
+                type="password"
+                autoComplete="off"
+                value={cxToken}
+                onChange={(e) => setCxToken(e.target.value)}
+                placeholder="token Cortex…"
+                style={fieldStyle}
+                spellCheck={false}
+              />
+              <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-secondary)' }}>
+                C'est le token MCP de ton Cortex. Il est stocké chiffré côté serveur, jamais renvoyé au navigateur.
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button type="submit" disabled={cxLoading || !cxToken} style={{ ...btnPrimary, opacity: cxLoading ? 0.7 : 1 }}>
+                {cxLoading ? 'Enregistrement…' : (hasCortex ? 'Remplacer le token' : 'Enregistrer')}
+              </button>
+              <button
+                type="button"
+                onClick={testCortex}
+                disabled={cxTesting || (!cxToken && !hasCortex)}
+                title={!cxToken && !hasCortex ? 'Renseigne d\'abord un token' : 'Tester la connexion Cortex'}
+                style={{
+                  padding: '9px 16px', fontSize: 13, fontWeight: 600,
+                  background: 'var(--bg-main, #fff)', color: 'var(--accent, #5d83d4)',
+                  border: '1px solid var(--accent, #5d83d4)', borderRadius: 8, cursor: 'pointer',
+                  opacity: cxTesting || (!cxToken && !hasCortex) ? 0.6 : 1,
+                }}
+              >
+                {cxTesting ? '… test' : '🔎 Tester'}
+              </button>
+              {hasCortex && (
+                <button
+                  type="button"
+                  onClick={clearCortex}
+                  style={{
+                    padding: '9px 14px', fontSize: 13, fontWeight: 600,
+                    background: 'transparent', color: '#b04040',
+                    border: '1px solid #f0c2c2', borderRadius: 8, cursor: 'pointer',
+                  }}
+                >
+                  Supprimer
+                </button>
+              )}
+              <span style={{
+                marginLeft: 'auto', fontSize: 12, fontWeight: 600,
+                padding: '4px 10px', borderRadius: 999,
+                background: hasCortex ? '#e7f5ec' : '#fff5e6',
+                color: hasCortex ? '#1f7a3a' : '#a06010',
+                border: `1px solid ${hasCortex ? '#cfe9d6' : '#f3e0c2'}`,
+              }}>
+                {hasCortex ? '✓ Cortex configuré' : '⚠ Cortex non configuré'}
+              </span>
+            </div>
+            <Status status={cxStatus} />
           </form>
         </Section>
 

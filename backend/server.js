@@ -359,9 +359,18 @@ fastify.post('/api/conversations/:id/to-cortex', async (request, reply) => {
     }
   }
 
+  const cortexCfg = await resolveCortexConfig(request.user);
+  if (cortexCfg.error) {
+    reply.code(400);
+    return { error: cortexCfg.message };
+  }
+
   try {
-    const note = await pushConversationToCortex(conv, idx);
-    fastify.log.info(`Note envoyée à Cortex : "${note.title}"`);
+    const note = await pushConversationToCortex(conv, idx, {
+      url: cortexCfg.url,
+      token: cortexCfg.token,
+    });
+    fastify.log.info(`Note envoyée à Cortex (${cortexCfg.source}) : "${note.title}"`);
     return { ok: true, title: note.title, tags: note.tags };
   } catch (err) {
     fastify.log.error({ err }, 'Echec envoi Cortex');
@@ -467,6 +476,27 @@ async function resolveApiKey(reqUser) {
     error: true,
     code: 'no_api_key',
     message: 'Pour utiliser le Council, ajoute ta clé OpenRouter dans « Mon compte ».',
+  };
+}
+
+/**
+ * Resout la config Cortex (url + token) a utiliser pour cette requete.
+ * Politique (v2.17, meme principe que la cle OpenRouter) :
+ *  - Utilisateur normal : utilise SA config Cortex (Mon compte).
+ *  - Administrateur : si pas de config perso, retombe sur le .env (filet).
+ * Renvoie { url, token, source: 'user'|'env' } ou { error, message } si rien.
+ */
+async function resolveCortexConfig(reqUser) {
+  const cfg = await users.getCortexConfig(reqUser.id);
+  if (cfg && cfg.token) {
+    return { url: cfg.url || process.env.CORTEX_MCP_URL || null, token: cfg.token, source: 'user' };
+  }
+  if (reqUser.is_admin && process.env.CORTEX_MCP_TOKEN) {
+    return { url: process.env.CORTEX_MCP_URL || null, token: process.env.CORTEX_MCP_TOKEN, source: 'env' };
+  }
+  return {
+    error: true,
+    message: 'Pour envoyer vers Cortex, ajoute ton URL et ton token Cortex dans « Mon compte ».',
   };
 }
 
