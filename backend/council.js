@@ -473,8 +473,62 @@ export async function stage3SynthesizeFinal(userQuery, stage1Results, stage2Resu
 }
 
 /**
- * Parse la reponse JSON du Chairman. Si echec, fallback : tout le contenu
- * devient final_answer et analysis = null (l'UI cachera l'onglet Analyse).
+ * Convertit les sequences d'echappement JSON (\n, \t, \", \\, ...) d'une
+ * string en vrais caracteres. Utilise quand on recupere la valeur de
+ * final_answer "a la main" (sans passer par JSON.parse), ou en tout dernier
+ * recours pour rendre lisible un texte ou les \n sont restes litteraux.
+ */
+function jsonUnescape(s) {
+  if (typeof s !== 'string') return s;
+  try {
+    // Astuce robuste : on re-parse la string comme une string JSON.
+    return JSON.parse('"' + s.replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"');
+  } catch {
+    // Fallback manuel si le re-parse echoue.
+    return s
+      .replace(/\\r\\n/g, '\n')
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\');
+  }
+}
+
+/**
+ * Extraction tolerante du champ "final_answer" dans un texte qui RESSEMBLE a
+ * du JSON mais que JSON.parse refuse (JSON casse / tronque, frequent avec les
+ * modeles :free). On scanne caractere par caractere a partir de la cle
+ * "final_answer" pour capturer la valeur string complete, en gerant les
+ * guillemets echappes. Renvoie la string brute (avec \n litteraux) ou null.
+ */
+function extractFinalAnswerLoose(text) {
+  const keyMatch = text.match(/"final_answer"\s*:\s*"/);
+  if (!keyMatch) return null;
+  let i = keyMatch.index + keyMatch[0].length;
+  let out = '';
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '\\') {
+      // garde la sequence d'echappement telle quelle (on l'unescape apres)
+      out += ch + (text[i + 1] || '');
+      i += 2;
+      continue;
+    }
+    if (ch === '"') break; // fin de la valeur string
+    out += ch;
+    i++;
+  }
+  return out.length ? out : null;
+}
+
+/**
+ * Parse la reponse JSON du Chairman. Plusieurs filets de securite (v2.16.4)
+ * pour ne JAMAIS afficher du JSON brut a l'utilisateur :
+ *   1. parse JSON direct
+ *   2. parse JSON dans un fence markdown
+ *   3. extraction tolerante de final_answer (JSON casse / tronque)
+ *   4. dernier recours : tout le texte, mais avec les \n litteraux convertis
+ *      en vrais retours a la ligne (au moins c'est lisible).
  */
 function parseChairmanResponse(text) {
   if (!text || typeof text !== 'string') {
@@ -501,11 +555,26 @@ function parseChairmanResponse(text) {
     };
   }
 
-  // Fallback : pas de JSON valide, on prend tout le texte comme synthese
-  // (le modele a probablement repondu en markdown direct au lieu du JSON)
+  // Tentative 3 : le texte ressemble a du JSON mais ne parse pas.
+  // On va chercher final_answer "a la main".
+  if (/"final_answer"\s*:/.test(text)) {
+    const loose = extractFinalAnswerLoose(text);
+    if (loose && loose.trim()) {
+      return {
+        analysis: null,
+        final_answer: jsonUnescape(loose),
+        method: 'loose_extract',
+      };
+    }
+  }
+
+  // Tentative 4 (dernier recours) : on garde tout le texte comme synthese,
+  // mais on convertit les \n litteraux en vrais retours a la ligne pour que
+  // ce soit lisible (cas ou le modele a repondu en markdown direct OU ou le
+  // JSON est trop casse pour en extraire quoi que ce soit).
   return {
     analysis: null,
-    final_answer: text,
+    final_answer: /\\n/.test(text) ? jsonUnescape(text) : text,
     method: 'fallback_text',
   };
 }

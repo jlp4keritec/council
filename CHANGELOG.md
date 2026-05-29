@@ -1,14 +1,15 @@
 # CHANGELOG — extrait à coller en haut de CHANGELOG.md
 
-## [2.16.3] - 2026-05-29
+## [2.16.4] - 2026-05-29
 
 ### Fixed
-- **Titre de conversation stocké comme objet** : `server.js` passait l'objet entier
-  `{title, theme}` renvoyé par `generateConversationTitle` à `updateConversationTitle`,
-  au lieu du seul texte. Cause racine du crash React error #31 sur la sidebar.
-  Corrigé aux deux endroits (mode normal + mode streaming SSE).
+- **Synthèse du Président affichée en JSON brut** : quand le modèle de synthèse
+  (souvent un `:free`) renvoyait un JSON cassé/tronqué, `JSON.parse` échouait et
+  l'ancien fallback affichait tout le texte brut avec les `\n` non interprétés.
+  `parseChairmanResponse` a maintenant 2 filets supplémentaires :
+  extraction tolérante du champ `final_answer` (JSON cassé), et conversion des
+  `\n` littéraux en vrais retours à la ligne en dernier recours.
 
-### Changed
-- `storage.js` : `updateConversationTitle(id, title, theme)` accepte désormais un `theme`
-  optionnel et **blinde** l'écriture : le titre est toujours persisté en texte, et un objet
-  reçu par erreur est décortiqué. Le `theme` est rangé dans `conv.theme` (champ séparé).
+### Added
+- `jsonUnescape()` et `extractFinalAnswerLoose()` (helpers internes `council.js`).
+- Nouveau `parse_method` possible : `loose_extract`.
