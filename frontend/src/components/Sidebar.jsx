@@ -5,6 +5,15 @@ import { useConfirm } from './ConfirmDialog.jsx';
 
 const MAX_SLOTS = 20;
 
+// Defensif : un titre peut etre une string OU un objet {title, theme}
+// (cas v2.16.2 ou le backend stocke title comme objet par erreur).
+// Convertit toujours en string pour eviter React error #31.
+function toTitle(t) {
+  if (typeof t === 'string') return t;
+  if (t && typeof t === 'object') return String(t.title || 'Sans titre');
+  return 'Sans titre';
+}
+
 // Cle localStorage utilisee par ModelSelector pour stocker l override.
 const COUNCIL_OVERRIDE_KEY = 'llm-council-config-override';
 
@@ -157,7 +166,7 @@ export default function Sidebar({
               title={formatDateTooltip(conv.created_at)}
             >
               <span className="sidebar-slot-num">{slotNum}</span>
-              <span className="sidebar-slot-title">{conv.title}</span>
+              <span className="sidebar-slot-title">{toTitle(conv.title)}</span>
               <button
                 className="sidebar-slot-delete"
                 onClick={(e) => handleDelete(e, conv.id)}

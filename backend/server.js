@@ -529,8 +529,8 @@ fastify.post('/api/conversations/:id/message', async (request, reply) => {
   await storage.addUserMessage(id, content);
 
   if (isFirstMessage) {
-    const title = await generateConversationTitle(content, override);
-    await storage.updateConversationTitle(id, title);
+    const { title, theme } = await generateConversationTitle(content, override);
+    await storage.updateConversationTitle(id, title, theme);
   }
 
   const result = await runFullCouncil(content, override);
@@ -678,8 +678,8 @@ fastify.post('/api/conversations/:id/message/stream', async (request, reply) => 
     });
 
     if (titlePromise) {
-      const title = await titlePromise;
-      await storage.updateConversationTitle(id, title);
+      const { title, theme } = await titlePromise;
+      await storage.updateConversationTitle(id, title, theme);
       sse({ type: 'title_complete', data: { title } });
     }
 

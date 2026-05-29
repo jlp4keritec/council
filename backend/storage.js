@@ -111,10 +111,34 @@ export async function addAssistantMessage(conversationId, { stage1, stage2, stag
   await saveConversation(conv);
 }
 
-export async function updateConversationTitle(conversationId, title) {
+// Met a jour le titre (et, optionnellement, le theme) d'une conversation.
+//
+// DEFENSIF (fix v2.16.3) : `title` doit TOUJOURS etre persiste comme string.
+// Si on recoit par erreur un objet { title, theme } (bug v2.16.2), on extrait
+// proprement le texte du titre + le theme. Le theme est range dans un champ
+// SEPARE `conv.theme`, jamais dans `conv.title`. Ainsi un titre objet ne peut
+// plus jamais etre ecrit sur le disque (= plus de React error #31).
+export async function updateConversationTitle(conversationId, title, theme) {
   const conv = await getConversation(conversationId);
   if (!conv) throw new Error(`Conversation ${conversationId} introuvable`);
-  conv.title = title;
+
+  let safeTitle = title;
+  let safeTheme = theme;
+
+  // Cas legacy : on nous passe l'objet entier { title, theme }.
+  if (title && typeof title === 'object') {
+    if (safeTheme === undefined || safeTheme === null) safeTheme = title.theme;
+    safeTitle = title.title;
+  }
+
+  conv.title = (typeof safeTitle === 'string' && safeTitle.trim())
+    ? safeTitle
+    : 'Nouvelle conversation';
+
+  if (typeof safeTheme === 'string' && safeTheme.trim()) {
+    conv.theme = safeTheme;
+  }
+
   await saveConversation(conv);
 }
 
